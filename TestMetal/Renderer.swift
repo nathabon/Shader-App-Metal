@@ -101,60 +101,51 @@ let spheres: [Sphere] = [
 
 // MARK: Renderer Metal
 
-// On garde toutes tes structures existantes ici sans modification (Camera3D, Material, Triangle, Sphere...)
-
-
 class Renderer: NSObject, MTKViewDelegate, ObservableObject {
-	
-	// MARK: - Metal Core
 	private var view: MTKView!
+	
 	let device: MTLDevice
 	let commandQueue: MTLCommandQueue
-	let computePipelineState: MTLComputePipelineState
-	let displayPipelineState: MTLRenderPipelineState
-	
-	// MARK: - Scene buffers
+	let pipelineState: MTLRenderPipelineState
 	private let spheresBuffer: MTLBuffer
 	private let trianglesBuffer: MTLBuffer
-	
 	private var accumulationTexture: MTLTexture!
 	private var frameCount: UInt32 = 0
-	private let renderingQueue = DispatchQueue(label: "RayTracingQueue")
-	private var renderingInProgress = false
 	
-	// MARK: - Camera
-	let cameraSpeed: Float = 0.1
-	var forward = SIMD3<Float>(0, 0, -1)
-	var right = SIMD3<Float>(1, 0, 0)
-	var yaw: Float = 0.0
-	var camera = Camera3D(position: SIMD3<Float>(0, 5, 5), fovy: 60)
-	private var resolution = SIMD2<Float>(0, 0)
 	
-	private var topLeft = SIMD3<Float>(0,0,0)
-	private var vx = SIMD3<Float>(0,0,0)
-	private var vy = SIMD3<Float>(0,0,0)
+	var keyZ = false // DEVANT
+	var keyS = false // DERRIERE
+	var keyQ = false // GAUCHE
+	var keyD = false // DROITE
+	var keyA = false // ACCUMULATION TOOGLE
+	var keyC = false // SCREENSHOT
+	var keyL = false // ROTATE LEFT
+	var keyR = false // ROTATE RIGHT
 	
-	// MARK: - Controls
-	var keyZ = false
-	var keyS = false
-	var keyQ = false
-	var keyD = false
-	var keyL = false
-	var keyR = false
-	var keyA = false
-	var keyC = false
-	private var isAccumulating = true
+	private var isAccumulating: Bool = false
 	
-	// MARK: - Init
+	// Caméra and viewport
+	let cameraSpeed: Float = 0.05
+	var forward: SIMD3<Float> = SIMD3<Float>(0, 0, -1)
+	var right: SIMD3<Float> = SIMD3<Float>(1, 0, 0)
+	
+	private var topLeft = SIMD3<Float>(0, 0, 0)
+	private var vx = SIMD3<Float>(0, 0, 0)
+	private var vy = SIMD3<Float>(0, 0, 0)
+	private var yaw: Float = 0.0
+	private var camera = Camera3D(position: SIMD3<Float>(0, 5, 5), fovy: 60)
+	var cameraPosition: SIMD3<Float> {
+		get { camera.position }
+		set { camera.position = newValue }
+	}
+	
+	// MARK: init
 	init(metalView: MTKView) {
 		self.device = metalView.device!
 		self.commandQueue = device.makeCommandQueue()!
 		self.view = metalView
 		
 		let library = device.makeDefaultLibrary()!
-		let computeFunction = library.makeFunction(name: "raytraceKernel")!
-		self.computePipelineState = try! device.makeComputePipelineState(function: computeFunction)
-		
 		let vertexFunction = library.makeFunction(name: "vertex_main")!
 		let fragmentFunction = library.makeFunction(name: "fragment_main")!
 		
@@ -162,140 +153,102 @@ class Renderer: NSObject, MTKViewDelegate, ObservableObject {
 		pipelineDescriptor.vertexFunction = vertexFunction
 		pipelineDescriptor.fragmentFunction = fragmentFunction
 		pipelineDescriptor.colorAttachments[0].pixelFormat = metalView.colorPixelFormat
-		self.displayPipelineState = try! device.makeRenderPipelineState(descriptor: pipelineDescriptor)
 		
-		self.spheresBuffer = device.makeBuffer(bytes: spheres, length: MemoryLayout<Sphere>.stride * spheres.count, options: [])!
-		self.trianglesBuffer = device.makeBuffer(bytes: triangles, length: MemoryLayout<Triangle>.stride * triangles.count, options: [])!
+		spheresBuffer = device.makeBuffer(bytes: spheres, length: MemoryLayout<Sphere>.stride * spheres.count, options: [.storageModeShared])!
+		
+		trianglesBuffer = device.makeBuffer(
+			bytes: triangles,
+			length: MemoryLayout<Triangle>.stride * triangles.count,
+			options: [.storageModeShared]
+		)!
+		
+		self.pipelineState = try! device.makeRenderPipelineState(descriptor: pipelineDescriptor)
 		
 		super.init()
 	}
 	
-	private func createAccumulationTexture(size: CGSize) {
-		let width = Int(size.width)
-		let height = Int(size.height)
-		resolution = SIMD2<Float>(Float(width), Float(height))
-		let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba32Float, width: width, height: height, mipmapped: false)
-		desc.usage = [.shaderRead, .shaderWrite]
-		accumulationTexture = device.makeTexture(descriptor: desc)
-		updateViewport()
-	}
-	
-	func startRendering() {
-		if renderingInProgress { return }
-		renderingInProgress = true
-		frameCount = 0
-		renderingQueue.async { [weak self] in
-			self?.renderLoop()
-		}
-	}
-	
-	private func renderLoop() {
-		while renderingInProgress {
-			autoreleasepool {
-				self.updateCamera()
-				self.renderOnePass()
-				usleep(5000)
-			}
-		}
-	}
-	
-	private func renderOnePass() {
-		let commandBuffer = commandQueue.makeCommandBuffer()!
-		let encoder = commandBuffer.makeComputeCommandEncoder()!
-		encoder.setComputePipelineState(computePipelineState)
-		encoder.setTexture(accumulationTexture, index: 0)
+	// MARK: initViewport
+	func initViewport(camera: Camera3D, resolution: SIMD2<Float>, yaw: Float, topLeft: inout SIMD3<Float>, vx: inout SIMD3<Float>, vy: inout SIMD3<Float>) {
 		
-		encoder.setBytes(&resolution, length: MemoryLayout<SIMD2<Float>>.stride, index: 0)
-		encoder.setBytes(&camera.position, length: MemoryLayout<SIMD3<Float>>.stride, index: 1)
-		encoder.setBuffer(spheresBuffer, offset: 0, index: 2)
-		var nbSpheresVar = spheresBuffer.length / MemoryLayout<Sphere>.stride
-		encoder.setBytes(&nbSpheresVar, length: MemoryLayout<Int>.stride, index: 3)
-		encoder.setBuffer(trianglesBuffer, offset: 0, index: 4)
-		var nbTrianglesVar = trianglesBuffer.length / MemoryLayout<Triangle>.stride
-		encoder.setBytes(&nbTrianglesVar, length: MemoryLayout<Int>.stride, index: 5)
-		encoder.setBytes(&frameCount, length: MemoryLayout<UInt32>.stride, index: 6)
-		encoder.setBytes(&isAccumulating, length: MemoryLayout<Bool>.stride, index: 7)
-		encoder.setBytes(&topLeft, length: MemoryLayout<SIMD3<Float>>.stride, index: 8)
-		encoder.setBytes(&vx, length: MemoryLayout<SIMD3<Float>>.stride, index: 9)
-		encoder.setBytes(&vy, length: MemoryLayout<SIMD3<Float>>.stride, index: 10)
-		
-		let threadsPerGroup = MTLSize(width: 8, height: 8, depth: 1)
-		let groups = MTLSize(width: (Int(resolution.x)+7)/8, height: (Int(resolution.y)+7)/8, depth: 1)
-		encoder.dispatchThreadgroups(groups, threadsPerThreadgroup: threadsPerGroup)
-		encoder.endEncoding()
-		commandBuffer.commit()
-		commandBuffer.waitUntilCompleted()
-		
-		frameCount += 1
-		
-		DispatchQueue.main.async {
-			self.view.setNeedsDisplay(self.view.bounds)
-		}
-	}
-	
-	private func updateViewport() {
 		let fov = camera.fovy * Float.pi / 180.0
 		let aspect = resolution.x / resolution.y
 		let viewportWidth = tan(fov / 2.0) * 2.0
 		let viewportHeight = viewportWidth / aspect
 		
-		forward = SIMD3<Float>(sin(yaw), 0, -cos(yaw))
-		right = SIMD3<Float>(-sin(yaw - Float.pi/2), 0, cos(yaw - Float.pi/2))
+		// Direction de la caméra
+		forward = SIMD3<Float>(
+			sin(yaw),
+			0,
+			-cos(yaw)
+		)
+		
+		right = SIMD3<Float>(
+			-sin(yaw - Float.pi / 2.0),
+			 0,
+			 cos(yaw - Float.pi / 2.0)
+		)
+		
 		let up = SIMD3<Float>(0, 1, 0)
+		
 		let center = camera.position + forward
 		let horizontal = right * viewportWidth
 		let vertical = up * viewportHeight
+		
 		topLeft = center - 0.5 * horizontal + 0.5 * -vertical
 		vx = horizontal / resolution.x
 		vy = vertical / resolution.y
 	}
 	
-	private func updateCamera() {
-		var moved = false
-		if keyZ { camera.position += forward * cameraSpeed; moved = true }
-		if keyS { camera.position -= forward * cameraSpeed; moved = true }
-		if keyQ { camera.position -= right * cameraSpeed; moved = true }
-		if keyD { camera.position += right * cameraSpeed; moved = true }
-		if keyL { yaw -= cameraSpeed * 0.5; moved = true }
-		if keyR { yaw += cameraSpeed * 0.5; moved = true }
+	// MARK: Accumulation
+	private func createAccumulationTexture(size: CGSize) {
+		let width = Int(size.width)
+		let height = Int(size.height)
 		
-		if moved {
-			updateViewport()
+		// Protection contre les tailles invalides
+		guard width > 0 && height > 0 else { return }
+		
+		let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba32Float, width: width, height: height, mipmapped: false)
+		descriptor.usage = [.shaderRead, .shaderWrite]
+		accumulationTexture = device.makeTexture(descriptor: descriptor)
+	}
+	
+	private func clearAccumulationTexture() {
+		guard let texture = accumulationTexture else { return }
+		
+		let width = texture.width
+		let height = texture.height
+		
+		let zeroColor = SIMD4<Float>(0, 0, 0, 0)
+		let region = MTLRegionMake2D(0, 0, width, height)
+		
+		var zeros = [SIMD4<Float>](repeating: zeroColor, count: width * height)
+		
+		texture.replace(region: region, mipmapLevel: 0, withBytes: &zeros, bytesPerRow: MemoryLayout<SIMD4<Float>>.stride * width)
+	}
+	
+	// MARK: Camera
+	func updateCamera() {
+		if keyZ { cameraPosition += forward * cameraSpeed }
+		if keyS { cameraPosition -= forward * cameraSpeed }
+		if keyQ { cameraPosition -= right * cameraSpeed }
+		if keyD { cameraPosition += right * cameraSpeed }
+		if keyL { yaw -= cameraSpeed * 0.5 }
+		if keyR { yaw += cameraSpeed * 0.5 }
+	}
+	
+	func toggleAccumulation() {
+		isAccumulating = !isAccumulating
+		
+		if isAccumulating {
+			clearAccumulationTexture()
 			frameCount = 0
 		}
-		
-		if keyA {
-			isAccumulating.toggle()
-			frameCount = 0
-			keyA = false
-		}
-		
-		if keyC {
-			takeScreenshot(view: view)
-			keyC = false
-		}
 	}
 	
-	func draw(in view: MTKView) {
-		guard let drawable = view.currentDrawable,
-			  let descriptor = view.currentRenderPassDescriptor else { return }
-		let commandBuffer = commandQueue.makeCommandBuffer()!
-		let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: descriptor)!
-		encoder.setRenderPipelineState(displayPipelineState)
-		encoder.setFragmentTexture(accumulationTexture, index: 0)
-		encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
-		encoder.endEncoding()
-		commandBuffer.present(drawable)
-		commandBuffer.commit()
-	}
-	
-	func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
-		createAccumulationTexture(size: size)
-		frameCount = 0
-	}
-	
-	private func takeScreenshot(view: MTKView) {
+	// MARK: takeScreenshot
+	func takeScreenshot(view: MTKView) {
 		guard let drawable = view.currentDrawable else { return }
+		
 		let texture = drawable.texture
 		let width = texture.width
 		let height = texture.height
@@ -310,25 +263,104 @@ class Renderer: NSObject, MTKViewDelegate, ObservableObject {
 		texture.getBytes(bytes, bytesPerRow: bytesPerRow, from: region, mipmapLevel: 0)
 		
 		let colorSpace = CGColorSpaceCreateDeviceRGB()
-		let bitmapInfo = CGBitmapInfo.byteOrder32Little.union(CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedFirst.rawValue))
+		let bitmapInfo = CGBitmapInfo.byteOrder32Little.union(
+			CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedFirst.rawValue)
+		)
+		
+		
 		guard let context = CGContext(data: bytes, width: width, height: height, bitsPerComponent: 8, bytesPerRow: bytesPerRow, space: colorSpace, bitmapInfo: bitmapInfo.rawValue),
-			  let cgImage = context.makeImage() else { return }
+			  let cgImage = context.makeImage() else {
+			return
+		}
 		
 		let nsImage = NSImage(cgImage: cgImage, size: NSSize(width: width, height: height))
+		
 		guard let tiffData = nsImage.tiffRepresentation,
 			  let bitmapRep = NSBitmapImageRep(data: tiffData),
-			  let pngData = bitmapRep.representation(using: .png, properties: [:]) else { return }
+			  let pngData = bitmapRep.representation(using: .png, properties: [:]) else {
+			return
+		}
 		
 		DispatchQueue.main.async {
 			let panel = NSSavePanel()
 			panel.title = "Save Screenshot"
 			panel.allowedFileTypes = ["png"]
 			panel.nameFieldStringValue = "screenshot.png"
+			
 			panel.begin { response in
 				if response == .OK, let url = panel.url {
-					try? pngData.write(to: url)
+					do {
+						try pngData.write(to: url)
+						print("Screenshot saved at \(url.path)")
+					} catch {
+						print("Error saving screenshot: \(error)")
+					}
 				}
 			}
 		}
+	}
+	
+	// MARK: Draw
+	func draw(in view: MTKView) {
+		if (accumulationTexture == nil || Int(view.drawableSize.width) != accumulationTexture.width || Int(view.drawableSize.height) != accumulationTexture.height) {
+			createAccumulationTexture(size: view.drawableSize)
+			frameCount = 0
+		}
+		
+		
+		updateCamera()
+		var resolution = SIMD2<Float>(Float(view.drawableSize.width), Float(view.drawableSize.height))
+		initViewport(camera: camera, resolution: resolution, yaw: yaw, topLeft: &topLeft, vx: &vx, vy: &vy)
+		
+		
+		
+		guard let drawable = view.currentDrawable,
+			  let descriptor = view.currentRenderPassDescriptor else { return }
+		
+		let commandBuffer = commandQueue.makeCommandBuffer()!
+		let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: descriptor)!
+		encoder.setRenderPipelineState(pipelineState)
+		
+		//var resolution = SIMD2<Float>(Float(view.drawableSize.width), Float(view.drawableSize.height))
+		encoder.setFragmentBytes(&resolution, length: MemoryLayout<SIMD2<Float>>.stride, index: 0)
+		encoder.setFragmentBytes(&cameraPosition, length: MemoryLayout<SIMD3<Float>>.stride, index: 1)
+		encoder.setFragmentBuffer(spheresBuffer, offset: 0, index: 2)
+		var nbSpheresVar = spheres.count
+		encoder.setFragmentBytes(&nbSpheresVar, length: MemoryLayout<Int>.stride, index: 3)
+		encoder.setFragmentBuffer(trianglesBuffer, offset: 0, index: 4)
+		var nbTrianglesVar = triangles.count
+		encoder.setFragmentBytes(&nbTrianglesVar, length: MemoryLayout<Int>.stride, index: 5)
+		encoder.setFragmentBytes(&frameCount, length: MemoryLayout<UInt32>.stride, index: 6)
+		encoder.setFragmentBytes(&isAccumulating, length: MemoryLayout<Bool>.stride, index: 7)
+		encoder.setFragmentBytes(&topLeft, length: MemoryLayout<SIMD3<Float>>.stride, index: 8)
+		encoder.setFragmentBytes(&vx, length: MemoryLayout<SIMD3<Float>>.stride, index: 9)
+		encoder.setFragmentBytes(&vy, length: MemoryLayout<SIMD3<Float>>.stride, index: 10)
+		
+		encoder.setFragmentTexture(accumulationTexture, index: 0)
+		
+		
+		encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
+		encoder.endEncoding()
+		commandBuffer.present(drawable)
+		commandBuffer.commit()
+		
+		if keyA {
+			toggleAccumulation()
+			keyA = false
+		}
+		
+		if keyC {
+			takeScreenshot(view: view)
+			keyC = false
+		}
+		
+		if isAccumulating {
+			frameCount += 1
+		}
+	}
+	
+	func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
+		createAccumulationTexture(size: size)
+		frameCount = 0
 	}
 }

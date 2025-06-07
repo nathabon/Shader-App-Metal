@@ -480,54 +480,57 @@ float3 getRayDir(float x, float y, float3 topLeft, float3 vx, float3 vy, float3 
 //}
 
 fragment float4 fragment_main(VertexOut in [[stage_in]],
-							  texture2d<float, access::sample> accumulationTexture [[texture(0)]])
+							  constant float2 &resolution [[buffer(0)]],
+							  constant float3 &cameraPos [[buffer(1)]],
+							  constant Sphere* spheres [[buffer(2)]],
+							  constant int &nbSpheres [[buffer(3)]],
+							  constant Triangle* triangles [[buffer(4)]],
+							  constant int &nbTriangles [[buffer(5)]],
+							  constant uint& frameCount [[buffer(6)]],
+							  constant bool& isAccumulating [[buffer(7)]],
+							  texture2d<float, access::read_write> accumulationTexture [[texture(0)]],
+							  constant float3 &topLeft [[buffer(8)]],
+							  constant float3 &vx [[buffer(9)]],
+							  constant float3 &vy [[buffer(10)]])
 {
-	return accumulationTexture.sample(sampler(coord::normalized), in.uv);
-}
-
-
-
-kernel void raytraceKernel(texture2d<float, access::read_write> accumulationTexture [[texture(0)]],
-						   constant float2 &resolution [[buffer(0)]],
-						   constant float3 &cameraPos [[buffer(1)]],
-						   constant Sphere* spheres [[buffer(2)]],
-						   constant int &nbSpheres [[buffer(3)]],
-						   constant Triangle* triangles [[buffer(4)]],
-						   constant int &nbTriangles [[buffer(5)]],
-						   constant uint& frameCount [[buffer(6)]],
-						   constant bool& isAccumulating [[buffer(7)]],
-						   constant float3 &topLeft [[buffer(8)]],
-						   constant float3 &vx [[buffer(9)]],
-						   constant float3 &vy [[buffer(10)]],
-						   uint2 gid [[thread_position_in_grid]])
-{
-	if (gid.x >= uint(resolution.x) || gid.y >= uint(resolution.y)) return;
 	
-	uint rngState = uint(gid.x) * 1973 + uint(gid.y) * 9277 + frameCount * 26699 + 1;
+	thread uint rngState = uint(uint(in.position.x) * uint(1973) + uint(in.position.y) * uint(9277) + uint(frameCount) * uint(26699)) | uint(1);
 	
-	float2 pixel = float2(gid);
+	//	float2 uv = in.uv * 2.0 - 1.0;
+	//	uv.x *= resolution.x / resolution.y;
+	//
 	float3 rayOrigin = cameraPos;
+	
+	float2 pixel = in.uv * resolution;
 	float3 pixelPos = topLeft + pixel.x * vx + pixel.y * vy;
-	float3 rayDir = normalize(pixelPos - rayOrigin);
+	float3 rayDir = normalize(pixelPos - cameraPos);
 	
-	const int NumRaysPerPixel = 10;
-	float3 totalIncomingLight = float3(0.0);
-	for (int rayIndex = 0; rayIndex < NumRaysPerPixel; rayIndex++) {
-		float dx = RandomFloat01(rngState);
-		float dy = RandomFloat01(rngState);
-		float2 pixelSample = pixel + float2(dx, dy);
-		float3 sampledDir = getRayDir(pixelSample.x, pixelSample.y, topLeft, vx, vy, rayOrigin);
-		totalIncomingLight += getColor(rayOrigin, sampledDir, spheres, nbSpheres, triangles, nbTriangles, 20, 20, rngState);
-	}
-	float3 color = totalIncomingLight / NumRaysPerPixel;
 	
+	float3 color = getColor(rayOrigin, rayDir, spheres, nbSpheres, triangles, nbTriangles, 5, 3, rngState);
+	
+	// Accumulation
 	if (isAccumulating) {
-		float4 previousColor = accumulationTexture.read(gid);
-		float newSampleCount = previousColor.a + 1.0;
-		float3 newSum = previousColor.rgb + color;
+		int NumRaysPerPixel = 10;
+		
+		float3 totalIncomingLight = float3(0.);
+		for (int rayIndex = 0; rayIndex < NumRaysPerPixel; rayIndex ++) {
+			float dx = RandomFloat01(rngState);
+			float dy = RandomFloat01(rngState);
+			
+			float2 pixelSample = pixel + float2(dx, dy);
+			rayDir = getRayDir(pixelSample.x, pixelSample.y, topLeft, vx, vy, rayOrigin);
+			
+			totalIncomingLight += getColor(rayOrigin, rayDir, spheres, nbSpheres, triangles, nbTriangles, 20, 20, rngState);
+		}
+		color = (totalIncomingLight + color) / (NumRaysPerPixel + 1);
+		
+		float4 accumulatedColor = accumulationTexture.read(uint2(in.position.x, in.position.y));
+		float newSampleCount = accumulatedColor.a + 1.0;
+		float3 newSum = accumulatedColor.rgb + color;
 		float4 newAccumulatedColor = float4(newSum, newSampleCount);
-		accumulationTexture.write(newAccumulatedColor, gid);
+		accumulationTexture.write(newAccumulatedColor, uint2(in.position.x, in.position.y));
+		return float4(newSum / newSampleCount, 1.0);
 	} else {
-		accumulationTexture.write(float4(color, 1.0), gid);
+		return float4(color, 1.0);
 	}
 }

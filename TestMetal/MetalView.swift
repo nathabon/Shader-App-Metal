@@ -43,12 +43,15 @@ class MetalHostingView: MTKView {
 		case "d": renderer?.keyD = true
 		case "a": renderer?.keyA = true
 		case "c": renderer?.keyC = true
+//		case "r": renderer?.keyr = true
 		default: break
 		}
 		
 		switch event.keyCode {
 		case 123: renderer?.keyL = true //gauche
 		case 124: renderer?.keyR = true //droit
+		case 125: renderer?.keyUp = true
+		case 126: renderer?.keyDown = true
 		default: break
 		}
 	}
@@ -61,6 +64,7 @@ class MetalHostingView: MTKView {
 		case "d": renderer?.keyD = false
 		case "a": renderer?.keyA = false
 		case "c": renderer?.keyC = false
+//		case "r": renderer?.keyr = false
 		default: break
 			
 		}
@@ -68,6 +72,8 @@ class MetalHostingView: MTKView {
 		switch event.keyCode {
 		case 123: renderer?.keyL = false //gauche
 		case 124: renderer?.keyR = false //droit
+		case 125: renderer?.keyUp = false
+		case 126: renderer?.keyDown = false
 		default:
 			break
 		}

@@ -87,9 +87,7 @@ struct Material {
 
 struct Bounds {
 	float3 boundMin;
-//	float   _pad0;
 	float3 boundMax;
-//	float   _pad1;
 };
 
 struct Node {
@@ -120,15 +118,6 @@ struct Triangle {
 	float3 B;
 	float3 C;
 	float3 n;
-	Material material;
-};
-
-struct Spot {
-	float3 center;
-	float radius;
-	float3 dir;
-	float fov; // En degrès
-	bool blur;
 	Material material;
 };
 
@@ -391,33 +380,6 @@ bool intersectMesh(Ray ray, MeshInfo mesh) {
 }
 
 
-
-float intersectSpot(Spot spot, Ray ray) {
-	float3 oc = ray.origin - spot.center;
-	float a = dot(ray.dir, ray.dir);
-	float b = 2.0 * dot(oc, ray.dir);
-	float c = dot(oc, oc) - spot.radius * spot.radius;
-	float discriminant = b * b - 4.0 * a * c;
-	
-	if (discriminant < 0.0) return -1.0;
-	
-	float t1 = (-b - sqrt(discriminant)) / (2.0 * a);
-	float t2 = (-b + sqrt(discriminant)) / (2.0 * a);
-	float t = min(t1, t2);
-	
-	if (t < 0.0) return -1.0;
-	
-	// Vérifier que le point d'intersection est dans le cône
-	float3 hitPoint = rayAt(ray, t);
-	float3 toLight = normalize(hitPoint - spot.center);
-	float cosAngle = dot(toLight, normalize(spot.dir));
-	float cosFov = cos(spot.fov * (M_PI / 180.0));
-	
-	if (cosAngle < cosFov) return -1.0;
-	
-	return t;
-}
-
 //MARK: Ray
 struct RayHit RayHit(bool hit, float t, float3 n, Material material) {
 	struct RayHit r;
@@ -492,51 +454,10 @@ struct RayHit rayCollisionMeshes(Ray ray, constant Triangle* triangles, int _nbT
 	return RayHit(t != MAX_T, t, triangle.n, triangle.material);
 }
 
-struct RayHit rayCollisionSpot(Ray ray, constant Spot* spots, int nb) {
-	float t = MAX_T;
-	float angle = 0;
-	Spot spot;
-	float _t;
-	for (int i = 0; i < nb; i++) {
-		_t = intersectSpot(spots[i], ray);
-		float _angle = acos(dot(ray.dir, normalize(spots[i].center - ray.origin))) * (180.0 / M_PI);
-		if (_t > 0 && _t < t && _angle < spots[i].fov) {
-			spot = spots[i];
-			t = _t;
-			angle = _angle;
-		}
-	}
-	
-	if (t == MAX_T) {
-		return RayHit(false, MAX_T, float3(0.), WHITE_MAT);
-	}
-	// Conversion manuelle en radians
-	float angleRad = angle * (M_PI / 180.0);
-	float blurFactor = spot.blur ? cos(angleRad * spot.fov / 90.0) : 1.0;
-	Material m = createMaterial(
-								spot.material.color,
-								spot.material.emitingColor,
-								blurFactor * spot.material.emitingStrength,
-								spot.material.smoothness
-								);
-	return RayHit(true, t, rayAt(ray, t) - spot.center, m);
-}
+
+
 
 //MARK: rayCollosionAll
-struct RayHit rayCollisionAllTriangle(Ray ray, constant Triangle* triangles, int nbTriangles) {
-	struct RayHit rayHit = rayCollisionTriangles(ray, triangles, nbTriangles);
-	
-	if (!rayHit.hit) return BLANK_RAY;
-	
-	struct RayHit rayH;
-	
-	rayH.hit = true;
-	rayHit.material = rayHit.material;
-	rayH.n = rayHit.n;
-	
-	return rayH;
-}
-
 struct RayHit rayCollosionAllMesh(Ray ray, constant Sphere* spheres, int nbSpheres, constant Triangle* triangles, int nbTriangles, constant MeshInfo* meshes, int nbMeshes) {
 	struct RayHit rayHitB = rayCollisionSpheres(ray, spheres, nbSpheres);
 	struct RayHit rayHitT = rayCollisionMeshes(ray, triangles, nbTriangles, meshes, nbMeshes);
@@ -565,34 +486,129 @@ struct RayHit rayCollosionAllMesh(Ray ray, constant Sphere* spheres, int nbSpher
 	return rayH;
 }
 
-Node rayCollisionNodes(Ray ray, Node parent, constant Node* nodes, int nbNode) {
-	if (!intersectBoundingBox(ray, parent.bounds)) return EMPTY_NODE;
-	if (parent.childIndex == 0) { return parent; }
+
+float getClosestBound(Ray ray, Bounds b) {
+	float3 invDir = 1.0 / ray.dir;
 	
-	Node n1 = rayCollisionNodes(ray, nodes[parent.childIndex], nodes, nbNode);
-	if (isNotEmptyNode(n1)) { return n1; }
-	Node n2 = rayCollisionNodes(ray, nodes[parent.childIndex + 1], nodes, nbNode);
-	if (isNotEmptyNode(n2)) { return n2; }
+	float3 t0 = (b.boundMin - ray.origin) * invDir;
+	float3 t1 = (b.boundMax - ray.origin) * invDir;
 	
-	return EMPTY_NODE;
+	float3 tmin = min(t0, t1);
+	float3 tmax = max(t0, t1);
+	
+	float tEntry = max(max(tmin.x, tmin.y), tmin.z);
+	float tExit  = min(min(tmax.x, tmax.y), tmax.z);
+	
+	if (tExit < 0.0 || tEntry > tExit) {
+		return MAX_T;
+	}
+	
+	return tEntry;
 }
 
-struct RayHit rayCollisionNodes(Ray ray, constant Node* nodes, int nbNodes, constant Triangle* triangles, int nbTriangles) {
+
+//MARK: Tas
+struct Tas {
+	int nodesIndex[32];
+	float dist[32];
+	int taille;
+};
+
+Tas createTas() {
+    Tas tas;
+    for (int k = 0; k < 32; ++k) {
+        tas.nodesIndex[k] = -1;
+        tas.dist[k] = MAX_T;
+    }
+    tas.taille = 0;
+    return tas;
+}
+
+float tasGetPrio(thread Tas* tas) {
+	return tas->dist[0];
+}
+
+
+void tasEchanger(thread Tas* tas, int i, int j) {
+	float tmp;
+	int tmp_;
+	tmp = tas->dist[i];
+	tmp_ = tas->nodesIndex[i];
+	tas->dist[i] = tas->dist[j];
+	tas->nodesIndex[i] = tas->nodesIndex[j];
+	tas->dist[j] = tmp;
+	tas->nodesIndex[j] = tmp_;
+}
+
+void tasTasser(thread Tas* tas, int i) {
+    float d = tas->dist[i];
+    while (i > 0) {
+        int parent = (i - 1) / 2;
+        float dist_parent = tas->dist[parent];
+		if (dist_parent <= d) { return; }
+		tasEchanger(tas, i, parent);
+		i = parent;
+    }
+}
+
+void tasAjouter(thread Tas* tas, int nodeIndex, float dist) {
+	if (tas->taille >= 32) { return; }
+	
+	tas->dist[tas->taille] = dist;
+	tas->nodesIndex[tas->taille] = nodeIndex;
+	tas->taille++;
+	
+	tasTasser(tas, tas->taille - 1);
+}
+
+int tasRetirer(thread Tas* tas) {
+	int s = tas->taille;
+	if (s == 0) return -1;
+	
+	tasEchanger(tas, 0, s - 1);
+	int index = tas->nodesIndex[s - 1];
+	tas->taille--;
+	
+	s = tas->taille;
+	int i = 0;
+	float d = tas->dist[i];
+	
+	while (true) {
+		int fg = 2 * i + 1;
+		if (fg >= s) break;
+		
+		int fmin = fg;
+		int fd = fg + 1;
+		if (fd < s && tas->dist[fd] < tas->dist[fg]) {
+			fmin = fd;
+		}
+		
+		if (tas->dist[fmin] < d) {
+			tasEchanger(tas, i, fmin);
+			i = fmin;
+		} else {
+			break;
+		}
+	}
+	
+	return index;
+}
+
+
+struct RayHit rayCollisionNodesTas(Ray ray, constant Node* nodes, int nbNodes, constant Triangle* triangles, int nbTriangles) {
 	float t = MAX_T;
 	float3 n = float3(0.);
 	Material mat = WHITE_MAT;
 	bool hit = false;
 	
-	Node stack[10];
-	int stackIndex = 0;
-	stack[stackIndex++] = nodes[0];
+	Tas tas = createTas();
+	tasAjouter(&tas, 0, getClosestBound(ray, nodes[0].bounds));
 	
-	while (stackIndex > 0) {
-		Node node = stack[--stackIndex];
+	while (tas.taille > 0 && tasGetPrio(&tas) < t) {
+		int nodeIdx = tasRetirer(&tas);
+		Node node = nodes[nodeIdx];
 		
-		if (!intersectBoundingBox(ray, node.bounds)) continue;
-		
-		if (node.childIndex == 0) { // Leaf
+		if (node.childIndex == 0) {
 			for (int j = node.triangleIndex; j < node.triangleIndex + node.nbTriangles; j++) {
 				float _t = intersectTriangle(triangles[j], ray);
 				if (_t > EPS && _t < t) {
@@ -603,11 +619,12 @@ struct RayHit rayCollisionNodes(Ray ray, constant Node* nodes, int nbNodes, cons
 				}
 			}
 		} else {
-			stack[stackIndex++] = nodes[node.childIndex];
-			stack[stackIndex++] = nodes[node.childIndex + 1];
+			float d = getClosestBound(ray, nodes[node.childIndex].bounds);
+			if (d < MAX_T) tasAjouter(&tas, node.childIndex, d);
+			d = getClosestBound(ray, nodes[node.childIndex+1].bounds);
+			if (d < MAX_T) tasAjouter(&tas, node.childIndex+1, d);
 		}
 	}
-	
 	
 	if (t == MAX_T) {
 		return RayHit(false, MAX_T, float3(0.), WHITE_MAT);
@@ -621,12 +638,114 @@ struct RayHit rayCollisionNodes(Ray ray, constant Node* nodes, int nbNodes, cons
 }
 
 
-struct RayHit rayCollisionAllV2(Ray ray, constant Sphere* spheres, int nbSpheres, constant Triangle* triangles, int nbTriangles, constant MeshInfo* meshes, int nbMeshes, thread const Spot* spots, int nbSpots) {
+struct RayHit rayCollisionNodesV2(Ray ray, constant Node* nodes, int nbNodes, constant Triangle* triangles, int nbTriangles) {
 	float t = MAX_T;
 	float3 n = float3(0.);
-	Spot spot;
-	float angle;
-	bool isSpot = false;
+	Material mat = WHITE_MAT;
+	bool hit = false;
+	
+	const int STACK_MAX = 64;
+	int stack[STACK_MAX];
+	int index = 0;
+	stack[index++] = 0;
+	
+	while (index > 0) {
+		int nodeIdx = stack[--index];
+		Node node = nodes[nodeIdx];
+		
+		float d = getClosestBound(ray, node.bounds);
+		if (d >= t) continue;
+		if (d == MAX_T) continue;
+		
+		if (node.childIndex == 0) {
+			int start = (int)node.triangleIndex;
+			int end   = start + (int)node.nbTriangles;
+			for (int j = start; j < end; ++j) {
+				float _t = intersectTriangle(triangles[j], ray);
+				if (_t > EPS && _t < t) {
+					t = _t;
+					n = triangles[j].n;
+					mat = triangles[j].material;
+					hit = true;
+				}
+			}
+		} else {
+			int L = node.childIndex;
+			int R = node.childIndex + 1;
+			
+			float d1 = getClosestBound(ray, nodes[L].bounds);
+			float d2 = getClosestBound(ray, nodes[R].bounds);
+			
+			bool h1 = (d1 < t && d1 != MAX_T);
+			bool h2 = (d2 < t && d2 != MAX_T);
+			
+			if (h1 && h2) {
+				if (index + 2 > STACK_MAX) continue;
+				if (d1 < d2) { stack[index++] = R; stack[index++] = L; }
+				else         { stack[index++] = L; stack[index++] = R; }
+			} else if (h1) {
+				if (index + 1 > STACK_MAX) continue;
+				stack[index++] = L;
+			} else if (h2) {
+				if (index + 1 > STACK_MAX) continue;
+				stack[index++] = R;
+			}
+			
+//			if (d1 < d2) {
+//				
+//			}
+		}
+	}
+	
+	if (!hit) return RayHit(false, MAX_T, float3(0.), WHITE_MAT);
+	return RayHit(true, t, n, mat);
+}
+
+struct RayHit rayCollisionNodes(Ray ray, constant Node* nodes, int nbNodes, constant Triangle* triangles, int nbTriangles) {
+	float t = MAX_T;
+	float3 n = float3(0.);
+	Material mat = WHITE_MAT;
+	bool hit = false;
+	
+	const int STACK_MAX = 64;
+	Node stack[STACK_MAX];
+	int index = 0;
+	stack[index++] = nodes[0];
+	while (index > 0) {
+		Node node = stack[--index];
+		
+		if (!intersectBoundingBox(ray, node.bounds)) continue;
+		
+		if (node.childIndex == 0) {
+			int start = (int)node.triangleIndex;
+			int end   = start + (int)node.nbTriangles;
+			for (int j = start; j < end; ++j) {
+				float _t = intersectTriangle(triangles[j], ray);
+				if (_t > EPS && _t < t) {
+					t = _t;
+					n = triangles[j].n;
+					mat = triangles[j].material;
+					hit = true;
+				}
+			}
+		} else {
+			if (index < STACK_MAX - 3) {
+				stack[index++] = nodes[node.childIndex];
+				stack[index++] = nodes[node.childIndex + 1];
+			}
+			
+		}
+	}
+	
+	if (!hit) return RayHit(false, MAX_T, float3(0.), WHITE_MAT);
+	return RayHit(true, t, n, mat);
+}
+
+
+
+struct RayHit rayCollisionAllV2(Ray ray, constant Sphere* spheres, int nbSpheres, constant Triangle* triangles, int nbTriangles, constant MeshInfo* meshes, int nbMeshes/*, thread const Spot* spots, int nbSpots*/) {
+	float t = MAX_T;
+	float3 n = float3(0.);
 	Material mat = WHITE_MAT;
 	bool hit = false;
 	
@@ -656,40 +775,9 @@ struct RayHit rayCollisionAllV2(Ray ray, constant Sphere* spheres, int nbSpheres
 		}
 	}
 	
-	// Recherche des spots
-	for (int i = 0; i < nbSpots; i++) {
-		float _t = intersectSpot(spots[i], ray);
-		if (_t > 0 && _t < t) {
-			t = _t;
-			n = rayAt(ray, t) - spots[i].center;
-			mat = spots[i].material;
-			hit = true;
-			
-			// Calcul de l'atténuation
-			float3 hitPoint = rayAt(ray, t);
-			float3 toLight = normalize(hitPoint - spots[i].center);
-			float cosAngle = dot(toLight, normalize(spots[i].dir));
-			float cosFov = cos(spots[i].fov * (M_PI / 180.0));
-			float atten = (cosAngle - cosFov) / (1.0 - cosFov);
-			float blur = spots[i].blur ? pow(atten, 4.0) : 1.0;
-			
-			mat.emitingStrength *= blur;
-		}
-	}
 	
 	if (t == MAX_T) {
 		return RayHit(false, MAX_T, float3(0.), WHITE_MAT);
-	}
-	
-	if (isSpot) {
-		float blurFactor = spot.blur ? cos(angle * spot.fov / 90.0) : 1.0;
-		Material m = createMaterial(
-									spot.material.color,
-									spot.material.emitingColor,
-									blurFactor * spot.material.emitingStrength,
-									spot.material.smoothness
-									);
-		return RayHit(true, t, rayAt(ray, t) - spot.center, m);
 	}
 	
 	if (hit) {
@@ -716,7 +804,7 @@ struct RayHit rayCollisionAllV3(Ray ray, constant Sphere* spheres, int nbSpheres
 		}
 	}
 	
-	struct RayHit rhit = rayCollisionNodes(ray, nodes, nbNodes, triangles, nbTriangles);
+	struct RayHit rhit = rayCollisionNodesV2(ray, nodes, nbNodes, triangles, nbTriangles);
 	
 	if (rhit.t < t) {
 		t = rhit.t;
@@ -794,12 +882,12 @@ float3 refractP(float3 uv, float3 n, float etai_over_etat) {
 }
 
 //MARK: getColor
-float3 getColor(Ray ray, constant Sphere* spheres, int nbSpheres, constant Triangle* triangles, int nbTriangles, constant MeshInfo* meshes, int nbMeshes, constant Node* nodes, int nbNodes, const thread Spot* spots, int nbSpots, int maxDepth, thread uint &rngState) {
+float3 getColor(Ray ray, constant Sphere* spheres, int nbSpheres, constant Triangle* triangles, int nbTriangles, constant MeshInfo* meshes, int nbMeshes, constant Node* nodes, int nbNodes,/* const thread Spot* spots, int nbSpots,*/ int maxDepth, thread uint &rngState) {
 	float3 incomingLight = float3(0.);
 	float3 color = float3(1.);
 	
 	for (int i = 0; i < maxDepth; i++) {
-		struct RayHit rayHit = rayCollisionAllV2(ray, spheres, nbSpheres, triangles, nbTriangles, meshes, nbMeshes, spots, nbSpots);
+		struct RayHit rayHit = rayCollisionAllV2(ray, spheres, nbSpheres, triangles, nbTriangles, meshes, nbMeshes/*, spots, nbSpots*/);
 		
 		if (!rayHit.hit || rayHit.t >= MAX_T) {
 			incomingLight += SKY_COLOR_ZENITH * color;
@@ -864,16 +952,6 @@ float3 getColor(Ray ray, constant Sphere* spheres, int nbSpheres, constant Trian
 }
 
 
-float3 getOnlyColorTriangle(Ray ray, constant Sphere* spheres, int nbSpheres, constant Triangle* triangles, int nbTriangles, constant MeshInfo* meshes, int nbMeshes) {
-	struct RayHit rayHit = rayCollosionAllMesh(ray, spheres, nbSpheres, triangles, nbTriangles, meshes, nbMeshes);
-	
-	if (rayHit.hit) {
-		return rayHit.material.emitingStrength < EPS ? rayHit.material.color : rayHit.material.emitingColor;
-	}
-	
-	return SKY_COLOR_ZENITH;
-}
-
 float3 getOnlyColorMesh(Ray ray, constant Sphere* spheres, int nbSpheres, constant Triangle* triangles, int nbTriangles, constant MeshInfo* meshes, int nbMeshes, device StatsGPU* stats) {
 	struct RayHit rayHit = rayCollosionAllMesh(ray, spheres, nbSpheres, triangles, nbTriangles, meshes, nbMeshes);
 	
@@ -889,7 +967,8 @@ float3 getOnlyColorV3(Ray ray, constant Sphere* spheres, int nbSpheres, constant
 	struct RayHit rayHit = rayCollisionAllV3(ray, spheres, nbSpheres, triangles, nbTriangles, nodes, nbNodes);
 	
 	if (rayHit.hit) {
-		return rayHit.material.emitingStrength < EPS ? rayHit.material.color : rayHit.material.emitingColor;
+//		return rayHit.material.emitingStrength < EPS ? rayHit.material.color : rayHit.material.emitingColor;
+		return (rayHit.n * 0.5f) + 0.5f;
 	}
 	
 	return SKY_COLOR_ZENITH;
@@ -901,6 +980,10 @@ float3 getRayDir(float x, float y, float3 topLeft, float3 vx, float3 vy, float3 
 	
 	return normalize(pointOnViewport - cameraPos);
 }
+
+//struct DebugParameters {
+//
+//}
 
 //MARK: Main
 fragment float4 fragment_main(VertexOut in [[stage_in]],
@@ -930,7 +1013,6 @@ fragment float4 fragment_main(VertexOut in [[stage_in]],
 							  constant bool& isAccumulating [[buffer(11)]],
 							  constant bool& enableRayTracing [[buffer(12)]],
 							  constant bool& enableBetterRayTracing [[buffer(21)]])
-							  
 {
 	float2 pixel = in.uv * resolution;
 	
@@ -963,12 +1045,12 @@ fragment float4 fragment_main(VertexOut in [[stage_in]],
 			rayDir = normalize(topLeft + pixelSample.x * vx + pixelSample.y * vy - cameraPos);
 			ray.dir = rayDir;
 			
-			float3 finalColor = getColor(ray, spheres, nbSpheres, triangles, nbTriangles, meshes, nbMeshes, nodes, nbNodes, nullptr, 0, maxBounce, rngState);
+			float3 finalColor = getColor(ray, spheres, nbSpheres, triangles, nbTriangles, meshes, nbMeshes, nodes, nbNodes, maxBounce, rngState);
 			totalIncomingLight += finalColor;
 		}
 		color = totalIncomingLight / raysPerPixel;
 	} else if (enableRayTracing) {
-		color = getColor(ray, spheres, nbSpheres, triangles, nbTriangles, meshes, nbMeshes, nodes, nbNodes, nullptr, 0, maxBouncePreview, rngState);
+		color = getColor(ray, spheres, nbSpheres, triangles, nbTriangles, meshes, nbMeshes, nodes, nbNodes, maxBouncePreview, rngState);
 	} else {
 		color = getOnlyColorV3(ray, spheres, nbSpheres, triangles, nbTriangles, nodes, nbNodes);
 //		color = getOnlyColorMesh(ray, spheres, nbSpheres, triangles, nbTriangles, meshes, nbMeshes, stats);

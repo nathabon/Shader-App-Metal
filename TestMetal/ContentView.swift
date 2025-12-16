@@ -213,6 +213,9 @@ struct ControlPanel: View {
 								), stepPerPixel: 0.05, range: -100...100, width: 90, format: .number.precision(.fractionLength(2))
 							)
 						}
+						Button("Placer en (0, 4, 14)") {
+							renderer.cameraPosition = SIMD3<Float>(0, 4, 14)
+						}
 						
 						Text("Rotation")
 						HStack {

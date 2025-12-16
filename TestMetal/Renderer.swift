@@ -12,6 +12,7 @@ import Foundation
 import simd
 import Metal
 import UniformTypeIdentifiers
+import time_h
 
 
 struct StatsGPU {
@@ -20,10 +21,16 @@ struct StatsGPU {
 	var trianglesTest:     UInt32 = UInt32(0)
 }
 
+struct StatsNodes {
+	var nbNodes: Int = 0
+	var nbLeafs: Int = 0
+	var maxDepth: Int = 0
+	var maxTriangles: Int = 0
+}
+
 
 func makeDefaultScene() -> SceneInfo {
-	var scene = loadMesh(named: "cat")
-//	print(scene.triangles)
+	var scene = loadMesh(named: "dragon_80k")
 	
 	var nodes: [Node] = []
 	var bound = Bounds.empty
@@ -36,17 +43,24 @@ func makeDefaultScene() -> SceneInfo {
 	var root = Node(childIndex: 0, triangleIndex: 0, nbTriangles: Int32(scene.triangles.count), depth: 0, bounds: bound)
 	nodes.append(root)
 	
-	split(parent: &root,
-		  triangles: &scene.triangles,
-		  nodes: &nodes,
-		  depth: 0,
-		  maxDepth: 10)
-
-	print(nodes.count)
-
+	var stats = StatsNodes()
 	
+	let dtime = Date().timeIntervalSince1970
+	split(parent: &root, triangles: &scene.triangles, nodes: &nodes, depth: 0, maxDepth: 32, stats: &stats)
+	let ftime = Date().timeIntervalSince1970
+	let time = ftime - dtime
+
 	scene.nodes = nodes
-	print(scene.nodes)
+	
+	print("Stats nodes")
+	print("Time (s) = \(time)")
+	print("Triangles : \(scene.triangles.count)")
+	print("Node count : \(scene.nodes?.count ?? 0)")
+	print("Leaf count : \(stats.nbLeafs)")
+	print("Max leaf depth : \(stats.maxDepth)")
+	print("Max triangles : \(stats.maxTriangles)")
+	print("Mean triangles : \(scene.triangles.count / (stats.nbLeafs + 1))")
+	
 
 	return scene
 }
@@ -134,7 +148,7 @@ class Renderer: NSObject, MTKViewDelegate, ObservableObject {
 			yaz = cameraRotation.x
 		}
 	}
-	var camera = Camera3D(position: SIMD3<Float>(0, 5, 5), fovy: 80)
+	var camera = Camera3D(position: SIMD3<Float>(0, 4, 14), fovy: 80)
 	@Published var cameraPosition: SIMD3<Float> {
 		didSet {
 			camera.position = cameraPosition

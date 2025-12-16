@@ -137,19 +137,20 @@ struct Node {
 	var triangleIndex: Int32
 	var nbTriangles:   Int32
 	var depth:         Int32
-	var bounds: Bounds
+	var bounds:        Bounds
 	
 	var barycentre: SIMD3<Float> { return (bounds.boundMax + bounds.boundMin) / 2 }
+
 }
 
 //MARK: Split
-func split(parent node: inout Node,
-		   triangles: inout [Triangle],
-		   nodes: inout [Node],
-		   depth: Int,
-		   maxDepth: Int)
-{
-	if depth >= maxDepth || node.nbTriangles <= 2 { return }
+func split(parent node: inout Node, triangles: inout [Triangle], nodes: inout [Node], depth: Int, maxDepth: Int, stats: inout StatsNodes) {
+	if depth >= maxDepth || node.nbTriangles <= 2 {
+		stats.nbLeafs += 1
+		stats.maxTriangles = max(stats.maxTriangles, Int(node.nbTriangles))
+		stats.maxDepth = max(stats.maxDepth, Int(node.depth))
+		return
+	}
 	
 	let parentIndex = nodes.firstIndex { $0.triangleIndex == node.triangleIndex &&
 		$0.nbTriangles  == node.nbTriangles &&
@@ -202,15 +203,14 @@ func split(parent node: inout Node,
 	nodes.append(left); nodes.append(right)
 	
 	node.childIndex = Int32(leftIndex)
-	nodes[parentIndex] = node   // ⬅︎ mise à jour réelle du parent
+	nodes[parentIndex] = node
 	
-	split(parent:&left, triangles:&triangles, nodes:&nodes, depth:depth+1, maxDepth:maxDepth)
-	split(parent:&right,triangles:&triangles,nodes:&nodes, depth:depth+1, maxDepth:maxDepth)
+	split(parent:&left, triangles:&triangles, nodes:&nodes, depth:depth+1, maxDepth:maxDepth, stats: &stats)
+	split(parent:&right,triangles:&triangles,nodes:&nodes, depth:depth+1, maxDepth:maxDepth, stats: &stats)
 	
 	nodes[leftIndex]   = left
 	nodes[leftIndex+1] = right
 }
-
 
 
 

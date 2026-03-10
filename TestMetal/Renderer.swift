@@ -31,6 +31,9 @@ struct StatsNodes {
 
 func makeDefaultScene() -> SceneInfo {
 	var scene = loadMesh(named: "dragon_80k")
+//	var scene = loadSalleMirroirs()
+//	var scene = loadMesh(named: "SalleCheval")
+//	var scene = loadSalleBoules()
 	
 	var nodes: [Node] = []
 	var bound = Bounds.empty
@@ -39,14 +42,24 @@ func makeDefaultScene() -> SceneInfo {
 		bound.growToInclude(t.B)
 		bound.growToInclude(t.C)
 	}
+	print(scene.meshes)
+	
+	nodes = []
+	
+	var stats = StatsNodes()
+	let dtime = Date().timeIntervalSince1970
+	
+	for mesh in scene.meshes {
+		var root = Node(childIndex: Int32(nodes.count), triangleIndex: mesh.firstTriangleIndex, nbTriangles: Int32(mesh.nbTriangles), depth: 0, bounds: Bounds(boundMin: mesh.boundMin, boundMax: mesh.boundMax))
+		nodes.append(root)
+		
+		split(parentIndex: Int32(nodes.count-1), parent: &root, triangles: &scene.triangles[mesh.firstTriangleIndex:mesh.firstTriangleIndex+mesh.nbTriangles], depth: 0, maxDepth: 32, stats: &stats)
+	}
 	
 	var root = Node(childIndex: 0, triangleIndex: 0, nbTriangles: Int32(scene.triangles.count), depth: 0, bounds: bound)
 	nodes.append(root)
 	
-	var stats = StatsNodes()
-	
-	let dtime = Date().timeIntervalSince1970
-	split(parent: &root, triangles: &scene.triangles, nodes: &nodes, depth: 0, maxDepth: 32, stats: &stats)
+	split(parentIndex: 0, parent: &root, triangles: &scene.triangles, nodes: &nodes, depth: 0, maxDepth: 32, stats: &stats)
 	let ftime = Date().timeIntervalSince1970
 	let time = ftime - dtime
 
@@ -59,14 +72,14 @@ func makeDefaultScene() -> SceneInfo {
 	print("Leaf count : \(stats.nbLeafs)")
 	print("Max leaf depth : \(stats.maxDepth)")
 	print("Max triangles : \(stats.maxTriangles)")
-	print("Mean triangles : \(scene.triangles.count / (stats.nbLeafs + 1))")
+	print("Mean triangles : \(Float(scene.triangles.count) / Float(stats.nbLeafs))")
 	
 
 	return scene
 }
 
 let scene = makeDefaultScene()
-var spheres: [Sphere] = scene.spheres
+var spheres: [Sphere] = scene.spheres/* + [Sphere(center: SIMD3<Float>(10, 2, 0), radius: 2, material: .whiteGlass), Sphere(center: SIMD3<Float>(3, 4, 0), radius: 1, material: .light)]*/
 var triangles: [Triangle] = scene.triangles
 var meshes = scene.meshes
 var nodes = scene.nodes!
@@ -418,7 +431,7 @@ class Renderer: NSObject, MTKViewDelegate, ObservableObject {
 	func writeRecordStats() {
         let lines = recordStats.compactMap { entry -> String? in
             guard let (rotation, fps) = entry else { return nil }
-            let rotStr = String(format: "%.2f", rotation * 180.0 / Float.pi)
+            let rotStr = String(format: "%.4f", rotation * 180.0 / Float.pi)
 			let gpuStr = String(format: "%.1f", fps)
 			return "\(rotStr), \(gpuStr)"
         }
@@ -458,7 +471,7 @@ class Renderer: NSObject, MTKViewDelegate, ObservableObject {
 			guard let tex = offscreenTexture else { return }
 			
 			// réinitialise les compteurs GPU (si utilisés dans les shaders)
-			statsBuffer.contents().initializeMemory(as: StatsGPU.self, repeating: StatsGPU(), count: 1)
+//			statsBuffer.contents().initializeMemory(as: StatsGPU.self, repeating: StatsGPU(), count: 1)
 			
 			// 2) caméra + viewport
 			updateCamera()

@@ -51,7 +51,7 @@ struct Material {
 	var isTransparent: Bool = false
 	var indice: Float = 1.0
 	
-	static let light = Material(color: .black, emitingColor: .white, emitingStrength: 5.0, smoothness: 0)
+	static let light = Material(color: .black, emitingColor: .white, emitingStrength: 3.0, smoothness: 0)
 	static let white = Material(color: .white, emitingColor: .black, emitingStrength: 0.0, smoothness: 0)
 	static let green = Material(color: .green, emitingColor: .black, emitingStrength: 0.0, smoothness: 0)
 	static let red = Material(color: .red, emitingColor: .black, emitingStrength: 0.0, smoothness: 0)
@@ -69,7 +69,7 @@ struct Material {
 	}
 	
 	static func coloredMirror(color: SIMD3<Float>) -> Material {
-		return Material(color: color, emitingColor: .black, emitingStrength: 0, smoothness: 1)
+		return Material(color: color, emitingColor: .black, emitingStrength: 0, smoothness: 0.999)
 	}
 	
 	static func tintedGlass(color: SIMD3<Float>) -> Material {
@@ -117,6 +117,7 @@ struct Bounds {
 		if point.y > boundMax.y { boundMax.y = point.y }
 		if point.z > boundMax.z { boundMax.z = point.z }
 	}
+	
 }
 
 struct MeshInfo: Equatable {
@@ -140,78 +141,147 @@ struct Node {
 	var bounds:        Bounds
 	
 	var barycentre: SIMD3<Float> { return (bounds.boundMax + bounds.boundMin) / 2 }
-
 }
+
+func getMean(_ points: [SIMD3<Float>], range: Range<Int>) -> SIMD3<Float>{
+	var mean: SIMD3<Float> = .zero
+	for j in stride(from: range.lowerBound, to: range.upperBound, by: 1) {
+		mean += points[j]
+	}
+	mean /= Float(range.count)
+	return mean
+}
+
+func getMean(_ points: [SIMD3<Float>]) -> SIMD3<Float>{
+	var mean: SIMD3<Float> = .zero
+	let n = points.count
+	for j in stride(from: 0, to: n, by: 1) {
+		mean += points[j]
+	}
+	mean /= Float(n)
+	return mean
+}
+
 
 //MARK: Split
-func split(parent node: inout Node, triangles: inout [Triangle], nodes: inout [Node], depth: Int, maxDepth: Int, stats: inout StatsNodes) {
-	if depth >= maxDepth || node.nbTriangles <= 2 {
-		stats.nbLeafs += 1
-		stats.maxTriangles = max(stats.maxTriangles, Int(node.nbTriangles))
-		stats.maxDepth = max(stats.maxDepth, Int(node.depth))
-		return
+func split(parentIndex: Int, parent node: inout Node, triangles: inout [Triangle], nodes: inout [Node], depth: Int, maxDepth: Int, stats: inout StatsNodes) {
+    if depth >= maxDepth || node.nbTriangles <= 2 {
+        stats.nbLeafs += 1
+        stats.maxTriangles = max(stats.maxTriangles, Int(node.nbTriangles))
+        stats.maxDepth = max(stats.maxDepth, Int(node.depth))
+        return
+    }
+    
+    let start = Int(node.triangleIndex)
+    let count = Int(node.nbTriangles)
+    let end   = start + count
+    
+    let dx = node.bounds.boundMax.x - node.bounds.boundMin.x
+    let dy = node.bounds.boundMax.y - node.bounds.boundMin.y
+    let dz = node.bounds.boundMax.z - node.bounds.boundMin.z
+    
+    var side = 0
+    var center = 0.0 as Float
+    if (dx > dy) {
+        if (dx > dz) {
+            side = 1
+            center = node.barycentre.x
+        } else {
+            side = 3
+            center = node.barycentre.z
+        }
+    } else {
+        if (dy > dz) {
+            side = 2
+            center = node.barycentre.y
+        } else {
+            side = 3
+            center = node.barycentre.z
+        }
+    }
+	
+	let _center2 = getMean(triangles[start..<end].map(\.baricenter))
+	var center2 = center
+	if side == 1 {
+		center2 = _center2.x
+	} else if side == 2 {
+		center2 = _center2.y
+	} else {
+		center2 = _center2.z
 	}
-	
-	let parentIndex = nodes.firstIndex { $0.triangleIndex == node.triangleIndex &&
-		$0.nbTriangles  == node.nbTriangles &&
-		$0.depth        == node.depth }!
-	
-	let start = Int(node.triangleIndex)
-	let count = Int(node.nbTriangles)
-	let end   = start + count
-	
-	let dx = node.bounds.boundMax.x - node.bounds.boundMin.x
-	let dy = node.bounds.boundMax.y - node.bounds.boundMin.y
-	let useX = dx >= dy
-	let center = useX ? node.barycentre.x : node.barycentre.y
-	
-	var leftCount = 0
-	for i in start..<end {
-		let t = triangles[i]
-		let goesLeft = useX ? (t.baricenter.x < center) : (t.baricenter.y < center)
-		if goesLeft {
-			triangles.swapAt(i, start + leftCount)
-			leftCount += 1
-		}
-	}
-	if leftCount == 0 || leftCount == count { return }
-	
-	let rightCount = count - leftCount
-	
-	var left = Node(childIndex:0,
-					triangleIndex:Int32(start),
-					nbTriangles: Int32(leftCount),
-					depth: Int32(depth+1),
-					bounds:.empty)
-	
-	var right = Node(childIndex:0,
-					 triangleIndex:Int32(start+leftCount),
-					 nbTriangles:Int32(rightCount),
-					 depth:Int32(depth+1),
-					 bounds:.empty)
-	
-	for i in start..<start+leftCount {
-		let t = triangles[i]
-		left.bounds.growToInclude(t.A); left.bounds.growToInclude(t.B); left.bounds.growToInclude(t.C)
-	}
-	for i in start+leftCount..<end {
-		let t = triangles[i]
-		right.bounds.growToInclude(t.A); right.bounds.growToInclude(t.B); right.bounds.growToInclude(t.C)
-	}
-	
-	let leftIndex = nodes.count
-	nodes.append(left); nodes.append(right)
-	
-	node.childIndex = Int32(leftIndex)
-	nodes[parentIndex] = node
-	
-	split(parent:&left, triangles:&triangles, nodes:&nodes, depth:depth+1, maxDepth:maxDepth, stats: &stats)
-	split(parent:&right,triangles:&triangles,nodes:&nodes, depth:depth+1, maxDepth:maxDepth, stats: &stats)
-	
-	nodes[leftIndex]   = left
-	nodes[leftIndex+1] = right
-}
+    
+    var leftCount = 0
+    var i = start
+    var j = end - 1
+    while i <= j {
+        let t = triangles[i]
+        let goesLeft: Bool = {
+            switch side {
+            case 1: return t.baricenter.x < center2
+            case 2: return t.baricenter.y < center2
+            default: return t.baricenter.z < center2
+            }
+        }()
+        
+        if goesLeft {
+            i += 1
+        } else {
+            triangles.swapAt(i, j)
+            j -= 1
+        }
+    }
+    leftCount = i - start
+    
+    if leftCount == 0 || leftCount == count {
+        stats.nbLeafs += 1
+        stats.maxTriangles = max(stats.maxTriangles, max(leftCount, count - leftCount))
+        stats.maxDepth = max(stats.maxDepth, Int(node.depth))
+        return
+    }
+    
+    let rightCount = count - leftCount
+    
+    var left = Node(childIndex:0,
+                    triangleIndex:Int32(start),
+                    nbTriangles: Int32(leftCount),
+                    depth: Int32(depth+1),
+                    bounds:.empty)
+    
+    var right = Node(childIndex:0,
+                     triangleIndex:Int32(start+leftCount),
+                     nbTriangles:Int32(rightCount),
+                     depth:Int32(depth+1),
+                     bounds:.empty)
+    
+    for i in start..<start+leftCount {
+        let t = triangles[i]
+        left.bounds.growToInclude(t.A)
+        left.bounds.growToInclude(t.B)
+        left.bounds.growToInclude(t.C)
+    }
+    for i in start+leftCount..<end {
+        let t = triangles[i]
+        right.bounds.growToInclude(t.A)
+        right.bounds.growToInclude(t.B)
+        right.bounds.growToInclude(t.C)
+    }
+    
+    let leftIndex = nodes.count
+    nodes.append(left)
+    nodes.append(right)
 
+    node.childIndex = Int32(leftIndex)
+    nodes[parentIndex] = node
+
+    var leftNode = nodes[leftIndex]
+    var rightNode = nodes[leftIndex + 1]
+
+    split(parentIndex: leftIndex, parent: &leftNode, triangles: &triangles, nodes: &nodes, depth: depth+1, maxDepth: maxDepth, stats: &stats)
+    split(parentIndex: leftIndex+1, parent: &rightNode, triangles: &triangles, nodes: &nodes, depth: depth+1, maxDepth: maxDepth, stats: &stats)
+
+    nodes[leftIndex] = leftNode
+    nodes[leftIndex + 1] = rightNode
+}
 
 
 
@@ -593,6 +663,7 @@ func loadMesh(named name: String, move: SIMD3<Float>, materials: [String: Materi
 		case "f": // Face
 			guard tokens.count >= 4 else {
 				print("Skipping malformed face at line \(lineIndex + 1)")
+				
 				continue
 			}
 			
@@ -602,6 +673,7 @@ func loadMesh(named name: String, move: SIMD3<Float>, materials: [String: Materi
 				let parts = tokens[i].split(separator: "/", omittingEmptySubsequences: false)
 				guard let vertexIndex = Int(parts[0]), vertexIndex > 0, vertexIndex <= vertices.count else {
 					print("Skipping malformed face index at line \(lineIndex + 1)")
+					print(line)
 					continue
 				}
 				let position = vertices[vertexIndex - 1]
@@ -700,22 +772,23 @@ func combineScenes(scene1: SceneInfo, scene2: SceneInfo) -> SceneInfo {
 
 // MARK: Salle mirroirs
 func loadTrianglesSalleMirroirs() -> [Triangle] {
+	let m = Material.coloredMirror(color: SIMD3(0.98, 0.98, 0.98))
 	return [
 		// MUR DROIT (ROUGE)
-		Triangle(A: SIMD3<Float>(5,0,-5), B: SIMD3<Float>(5,10,-5), C: SIMD3<Float>(5,10,5), n: SIMD3<Float>(-1,0,0), material: .coloredMirror(color: .red)),
-		Triangle(A: SIMD3<Float>(5,10,5), B: SIMD3<Float>(5,0,-5), C: SIMD3<Float>(5,0,5), n: SIMD3<Float>(-1,0,0), material: .coloredMirror(color: .red)),
+		Triangle(A: SIMD3<Float>(5,0,-5), B: SIMD3<Float>(5,10,-5), C: SIMD3<Float>(5,10,5), n: SIMD3<Float>(-1,0,0), material: m),
+		Triangle(A: SIMD3<Float>(5,10,5), B: SIMD3<Float>(5,0,-5), C: SIMD3<Float>(5,0,5), n: SIMD3<Float>(-1,0,0), material: m),
 		// MUR GAUCHE (BLUE)
-		Triangle(A: SIMD3<Float>(-5,0,-5), B: SIMD3<Float>(-5,10,-5), C: SIMD3<Float>(-5,10,5), n: SIMD3<Float>(1,0,0), material: .coloredMirror(color: .blue)),
-		Triangle(A: SIMD3<Float>(-5,10,5), B: SIMD3<Float>(-5,0,-5), C: SIMD3<Float>(-5,0,5), n: SIMD3<Float>(1,0,0), material: .coloredMirror(color: .blue)),
+		Triangle(A: SIMD3<Float>(-5,0,-5), B: SIMD3<Float>(-5,10,-5), C: SIMD3<Float>(-5,10,5), n: SIMD3<Float>(1,0,0), material: m),
+		Triangle(A: SIMD3<Float>(-5,10,5), B: SIMD3<Float>(-5,0,-5), C: SIMD3<Float>(-5,0,5), n: SIMD3<Float>(1,0,0), material: m),
 		// MUR DU FONC (BLANC)
-		Triangle(A: SIMD3<Float>(-5,0,-5), B: SIMD3<Float>(-5,10,-5), C: SIMD3<Float>(5,0,-5), n: SIMD3<Float>(0,0,1), material: .mirror),
-		Triangle(A: SIMD3<Float>(5,10,-5), B: SIMD3<Float>(-5,10,-5), C: SIMD3<Float>(5,0,-5), n: SIMD3<Float>(0,0,1), material: .mirror),
+		Triangle(A: SIMD3<Float>(-5,0,-5), B: SIMD3<Float>(-5,10,-5), C: SIMD3<Float>(5,0,-5), n: SIMD3<Float>(0,0,1), material: m),
+		Triangle(A: SIMD3<Float>(5,10,-5), B: SIMD3<Float>(-5,10,-5), C: SIMD3<Float>(5,0,-5), n: SIMD3<Float>(0,0,1), material: m),
 		// MUR DE DEVANT (BLANC)
-		Triangle(A: SIMD3<Float>(-5,0,5), B: SIMD3<Float>(-5,10,5), C: SIMD3<Float>(5,0,5), n: SIMD3<Float>(0,0,-1), material: .mirror),
-		Triangle(A: SIMD3<Float>(5,10,5), B: SIMD3<Float>(-5,10,5), C: SIMD3<Float>(5,0,5), n: SIMD3<Float>(0,0,-1), material: .mirror),
+		Triangle(A: SIMD3<Float>(-5,0,5), B: SIMD3<Float>(-5,10,5), C: SIMD3<Float>(5,0,5), n: SIMD3<Float>(0,0,-1), material: m),
+		Triangle(A: SIMD3<Float>(5,10,5), B: SIMD3<Float>(-5,10,5), C: SIMD3<Float>(5,0,5), n: SIMD3<Float>(0,0,-1), material: m),
 		// SOL (GRIS)
-		Triangle(A: SIMD3<Float>(-5,0,-5), B: SIMD3<Float>(5,0,-5), C: SIMD3<Float>(5,0,5), n: SIMD3<Float>(0,1,0), material: .white),
-		Triangle(A: SIMD3<Float>(-5,0,-5), B: SIMD3<Float>(-5,0,5), C: SIMD3<Float>(5,0,5), n: SIMD3<Float>(0,1,0), material: .white),
+		Triangle(A: SIMD3<Float>(-5,0,-5), B: SIMD3<Float>(5,0,-5), C: SIMD3<Float>(5,0,5), n: SIMD3<Float>(0,1,0), material: .gray),
+		Triangle(A: SIMD3<Float>(-5,0,-5), B: SIMD3<Float>(-5,0,5), C: SIMD3<Float>(5,0,5), n: SIMD3<Float>(0,1,0), material: .gray),
 		// PLAFOND (GRIS)
 		Triangle(A: SIMD3<Float>(-5,10,-5), B: SIMD3<Float>(5,10,-5), C: SIMD3<Float>(5,10,5), n: SIMD3<Float>(0,-1,0), material: .gray),
 		Triangle(A: SIMD3<Float>(-5,10,-5), B: SIMD3<Float>(-5,10,5), C: SIMD3<Float>(5,10,5), n: SIMD3<Float>(0,-1,0), material: .gray),
@@ -727,10 +800,10 @@ func loadTrianglesSalleMirroirs() -> [Triangle] {
 
 func loadSpheresSalleMirroirs() -> [Sphere] {
 	return [
-		Sphere(center: [0, 5, -3], radius: 1.0, material: .tintedGlass(color: .red)),
-//		Sphere(center: [2, 6, -4], radius: 0.8, material: .green),
+//		Sphere(center: [0, 5, -3], radius: 1.0, material: .tintedGlass(color: .red)),
+		Sphere(center: [2, 6, -4], radius: 0.8, material: .green),
 		Sphere(center: [-2, 6, -4], radius: 1.0, material: .red),
-		Sphere(center: [2, 6, -4], radius: 0.8, material: .whiteGlass)
+		Sphere(center: [0, 3, -4], radius: 0.8, material: .whiteGlass)
 		
 	]
 }
@@ -930,3 +1003,4 @@ func loadScenePlan200Boules() -> SceneInfo {
     ))
     return SceneInfo(spheres: spheres, triangles: triangles, meshes: meshes)
 }
+

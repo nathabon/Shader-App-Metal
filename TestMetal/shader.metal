@@ -131,6 +131,7 @@ struct MeshInfo {
 struct Ray {
 	float3 origin;
 	float3 dir;
+	float3 invDir;
 };
 
 struct RayHit {
@@ -146,6 +147,11 @@ struct StatsGPU {
 	atomic_uint onScreenTriangles;
 	atomic_uint totalTriangles;
 	atomic_uint trianglesTest;
+};
+
+struct Stats {
+	float triangleTest;
+	float boxTest;
 };
 
 inline void atomic_inc(device atomic_uint *p, uint v = 1) {
@@ -234,6 +240,7 @@ Ray createRay(float3 origin, float3 dir) {
 	Ray r;
 	r.origin = origin;
 	r.dir = dir;
+	r.invDir = 1 / dir;
 	
 	return r;
 }
@@ -329,8 +336,7 @@ float intersectTriangle(float3 A, float3 B, float3 C, float3 n, float3 origin, f
 	float det   = dot(AB, pvec);
 	
 	// Rayon parallèle ou triangle dos tourné (selon que l’on veut culler ou pas)
-//	if (fabs(det) < 0)
-//		return -1.0;
+	if (fabs(det) < 0) return -1.0;
 	
 	float invDet = 1.0 / det;
 	
@@ -358,9 +364,8 @@ float intersectTriangle(Triangle triangle, Ray ray) {
 }
 
 bool intersectBoundingBox(Ray ray, float3 BoundMin, float3 BoundMax) {
-	float3 invDir = 1.0 / ray.dir;
-	float3 t0 = (BoundMin - ray.origin) * invDir;
-	float3 t1 = (BoundMax - ray.origin) * invDir;
+	float3 t0 = (BoundMin - ray.origin) * ray.invDir;
+	float3 t1 = (BoundMax - ray.origin) * ray.invDir;
 	
 	float3 tMinVec = min(t0, t1);
 	float3 tMaxVec = max(t0, t1);
@@ -594,7 +599,7 @@ int tasRetirer(thread Tas* tas) {
 	return index;
 }
 
-
+//MARK: rayCollisionNodes
 struct RayHit rayCollisionNodesTas(Ray ray, constant Node* nodes, int nbNodes, constant Triangle* triangles, int nbTriangles) {
 	float t = MAX_T;
 	float3 n = float3(0.);
@@ -638,13 +643,13 @@ struct RayHit rayCollisionNodesTas(Ray ray, constant Node* nodes, int nbNodes, c
 }
 
 
-struct RayHit rayCollisionNodesV2(Ray ray, constant Node* nodes, int nbNodes, constant Triangle* triangles, int nbTriangles) {
+struct RayHit rayCollisionNodesV2(Ray ray, constant Node* nodes, int nbNodes, constant Triangle* triangles, int nbTriangles, thread Stats* stats) {
 	float t = MAX_T;
 	float3 n = float3(0.);
 	Material mat = WHITE_MAT;
 	bool hit = false;
 	
-	const int STACK_MAX = 64;
+	const int STACK_MAX = 32;
 	int stack[STACK_MAX];
 	int index = 0;
 	stack[index++] = 0;
@@ -654,6 +659,7 @@ struct RayHit rayCollisionNodesV2(Ray ray, constant Node* nodes, int nbNodes, co
 		Node node = nodes[nodeIdx];
 		
 		float d = getClosestBound(ray, node.bounds);
+		stats->boxTest++;
 		if (d >= t) continue;
 		if (d == MAX_T) continue;
 		
@@ -662,6 +668,7 @@ struct RayHit rayCollisionNodesV2(Ray ray, constant Node* nodes, int nbNodes, co
 			int end   = start + (int)node.nbTriangles;
 			for (int j = start; j < end; ++j) {
 				float _t = intersectTriangle(triangles[j], ray);
+				stats->triangleTest++;
 				if (_t > EPS && _t < t) {
 					t = _t;
 					n = triangles[j].n;
@@ -675,6 +682,7 @@ struct RayHit rayCollisionNodesV2(Ray ray, constant Node* nodes, int nbNodes, co
 			
 			float d1 = getClosestBound(ray, nodes[L].bounds);
 			float d2 = getClosestBound(ray, nodes[R].bounds);
+			stats->boxTest++;stats->boxTest++;
 			
 			bool h1 = (d1 < t && d1 != MAX_T);
 			bool h2 = (d2 < t && d2 != MAX_T);
@@ -691,9 +699,6 @@ struct RayHit rayCollisionNodesV2(Ray ray, constant Node* nodes, int nbNodes, co
 				stack[index++] = R;
 			}
 			
-//			if (d1 < d2) {
-//				
-//			}
 		}
 	}
 	
@@ -701,7 +706,7 @@ struct RayHit rayCollisionNodesV2(Ray ray, constant Node* nodes, int nbNodes, co
 	return RayHit(true, t, n, mat);
 }
 
-struct RayHit rayCollisionNodes(Ray ray, constant Node* nodes, int nbNodes, constant Triangle* triangles, int nbTriangles) {
+struct RayHit rayCollisionNodes(Ray ray, constant Node* nodes, int nbNodes, constant Triangle* triangles, int nbTriangles, thread Stats* stats) {
 	float t = MAX_T;
 	float3 n = float3(0.);
 	Material mat = WHITE_MAT;
@@ -715,12 +720,14 @@ struct RayHit rayCollisionNodes(Ray ray, constant Node* nodes, int nbNodes, cons
 		Node node = stack[--index];
 		
 		if (!intersectBoundingBox(ray, node.bounds)) continue;
+		stats->boxTest++;
 		
 		if (node.childIndex == 0) {
 			int start = (int)node.triangleIndex;
 			int end   = start + (int)node.nbTriangles;
 			for (int j = start; j < end; ++j) {
 				float _t = intersectTriangle(triangles[j], ray);
+				stats->triangleTest++;
 				if (_t > EPS && _t < t) {
 					t = _t;
 					n = triangles[j].n;
@@ -743,7 +750,7 @@ struct RayHit rayCollisionNodes(Ray ray, constant Node* nodes, int nbNodes, cons
 
 
 
-struct RayHit rayCollisionAllV2(Ray ray, constant Sphere* spheres, int nbSpheres, constant Triangle* triangles, int nbTriangles, constant MeshInfo* meshes, int nbMeshes/*, thread const Spot* spots, int nbSpots*/) {
+struct RayHit rayCollisionAllV2(Ray ray, constant Sphere* spheres, int nbSpheres, constant Triangle* triangles, int nbTriangles, constant MeshInfo* meshes, int nbMeshes) {
 	float t = MAX_T;
 	float3 n = float3(0.);
 	Material mat = WHITE_MAT;
@@ -787,7 +794,7 @@ struct RayHit rayCollisionAllV2(Ray ray, constant Sphere* spheres, int nbSpheres
 	return BLANK_RAY;
 }
 
-struct RayHit rayCollisionAllV3(Ray ray, constant Sphere* spheres, int nbSpheres, constant Triangle* triangles, int nbTriangles, constant Node* nodes, int nbNodes) {
+struct RayHit rayCollisionAllV3(Ray ray, constant Sphere* spheres, int nbSpheres, constant Triangle* triangles, int nbTriangles, constant Node* nodes, int nbNodes, thread Stats* stats) {
 	float t = MAX_T;
 	float3 n = float3(0.);
 	Material mat = WHITE_MAT;
@@ -804,7 +811,8 @@ struct RayHit rayCollisionAllV3(Ray ray, constant Sphere* spheres, int nbSpheres
 		}
 	}
 	
-	struct RayHit rhit = rayCollisionNodesV2(ray, nodes, nbNodes, triangles, nbTriangles);
+	if (!intersectBoundingBox(ray, nodes[0].bounds) && !hit) return BLANK_RAY;
+	struct RayHit rhit = rayCollisionNodesV2(ray, nodes, nbNodes, triangles, nbTriangles, stats);
 	
 	if (rhit.t < t) {
 		t = rhit.t;
@@ -835,29 +843,6 @@ float3 lerp(float3 a, float3 b, float p) {
 }
 
 //MARK: Color
-float3 GetEnvironmentLight(Ray ray)
-{
-//	if (!EnvironmentEnabled) {
-//		return 0;
-//	}
-	
-	float3 sunDir = normalize(SUN_POS);
-	float sun = pow(max(0., dot(ray.dir, sunDir)), SUN_FOCUS) * SUN_INTENSITY;
-	
-	float skyGradientT = pow(smoothstep(0, 0.4, ray.dir.y), 0.35);
-	float groundToSkyT = smoothstep(-0.01, 0, ray.dir.y);
-	float3 skyGradient = lerp(SKY_COLOR_HORIZON, SKY_COLOR_ZENITH, skyGradientT);
-	
-	// Nuages par pseudo bruit sinusoïdal
-	float cloudNoise = sin(ray.dir.x * 40.) * sin(ray.dir.z * 40.);
-	float clouds = smoothstep(0.2, 0.5, cloudNoise);
-	float3 cloudColor = float3(1.0) * clouds * 0.5;
-	
-	float3 composite = lerp(GROUND_COLOR, skyGradient, groundToSkyT) + sun + cloudColor;
-
-	return composite;
-}
-
 float3 refractRay(float3 d, float3 n, float n1, float n2) {
 	float eta = n1 / n2;
 	float cosi = clamp(-dot(d, n), -1.0, 1.0);
@@ -882,12 +867,12 @@ float3 refractP(float3 uv, float3 n, float etai_over_etat) {
 }
 
 //MARK: getColor
-float3 getColor(Ray ray, constant Sphere* spheres, int nbSpheres, constant Triangle* triangles, int nbTriangles, constant MeshInfo* meshes, int nbMeshes, constant Node* nodes, int nbNodes,/* const thread Spot* spots, int nbSpots,*/ int maxDepth, thread uint &rngState) {
+float3 getColor(Ray ray, constant Sphere* spheres, int nbSpheres, constant Triangle* triangles, int nbTriangles/*, constant MeshInfo* meshes, int nbMeshes*/, constant Node* nodes, int nbNodes, thread Stats* stats, int maxDepth, thread uint &rngState) {
 	float3 incomingLight = float3(0.);
 	float3 color = float3(1.);
 	
 	for (int i = 0; i < maxDepth; i++) {
-		struct RayHit rayHit = rayCollisionAllV2(ray, spheres, nbSpheres, triangles, nbTriangles, meshes, nbMeshes/*, spots, nbSpots*/);
+		struct RayHit rayHit = rayCollisionAllV3(ray, spheres, nbSpheres, triangles, nbTriangles, nodes, nbNodes, stats);
 		
 		if (!rayHit.hit || rayHit.t >= MAX_T) {
 			incomingLight += SKY_COLOR_ZENITH * color;
@@ -897,16 +882,16 @@ float3 getColor(Ray ray, constant Sphere* spheres, int nbSpheres, constant Trian
 		float3 hitPos = rayAt(ray, rayHit.t);
 		
 		// Carrelage sol
-//		if (abs(hitPos.y) < 0.2 && abs(rayHit.n.y) > 0.9) {
-//			float gridSize = 2.0;
-//			int xi = int(floor(hitPos.x / gridSize));
-//			int zi = int(floor(hitPos.z / gridSize));
-//			int parity = (xi + zi) & 1;
-//			
-//			float3 lightGray = float3(0.8);
-//			float3 darkGray  = float3(0.2);
-//			rayHit.material.color *= mix(lightGray, darkGray, parity);
-//		}
+		if (abs(hitPos.y) < 0.2 && abs(rayHit.n.y) > 0.9) {
+			float gridSize = 2.0;
+			int xi = int(floor(hitPos.x / gridSize));
+			int zi = int(floor(hitPos.z / gridSize));
+			int parity = (xi + zi) & 1;
+			
+			float3 lightGray = float3(0.8);
+			float3 darkGray  = float3(0.2);
+			rayHit.material.color *= mix(lightGray, darkGray, parity);
+		}
 		
 		Material material = rayHit.material;
 		
@@ -916,38 +901,54 @@ float3 getColor(Ray ray, constant Sphere* spheres, int nbSpheres, constant Trian
 		
 		
 		if (material.isTransparent) {
-			ray.origin = hitPos + rayHit.n * EPS * sign(dot(ray.dir, rayHit.n));
-			float n1 = outside ? 1.0 : material.indice;
-			float n2 = outside ? material.indice : 1.0;
-			float over = n2 / n1;
+			// Determine if we are entering or exiting and orient the normal accordingly
+			bool frontFace = dot(ray.dir, rayHit.n) < 0.0;
+			float3 n = frontFace ? rayHit.n : -rayHit.n;
+			float n1 = frontFace ? 1.0 : material.indice;
+			float n2 = frontFace ? material.indice : 1.0;
+			float eta = n1 / n2;
 			
-			ray.dir = normalize(refractP(ray.dir, rayHit.n, over));
+			// Schlick reflectance approximation
+			float cosTheta = clamp(dot(-ray.dir, n), 0.0, 1.0);
+			float sin2Theta = max(0.0, 1.0 - cosTheta * cosTheta);
+			bool cannotRefract = (eta * eta * sin2Theta) > 1.0;
+			float r0 = (n1 - n2) / (n1 + n2);
+			r0 = r0 * r0;
+			float reflectProb = r0 + (1.0 - r0) * pow(1.0 - cosTheta, 5.0);
+			
+			float3 newDir;
+			if (cannotRefract || RandomFloat01(rngState) < reflectProb) {
+				newDir = reflect(ray.dir, n);
+			} else {
+				newDir = normalize(refractP(ray.dir, n, eta));
+			}
+			
+			ray.origin = hitPos + newDir * EPS;
+			ray.dir = newDir;
+			
 			color *= material.color;
-			
 		} else {
 			ray.origin = hitPos + rayHit.n * EPS;
 			float3 specularDir = reflect(ray.dir, rayHit.n);
 			float3 diffuseDir  = normalize(rayHit.n + RandomDirection(rngState));
 			
-			// Lumière émise par le matériau touché (lampe, spot, etc.)
+			// Lumière émise par le matériau touché
 			float3 emitedLight = material.emitingColor * material.emitingStrength;
 			incomingLight += emitedLight * color;
 			
 			color *= material.color;
 			
 			// Choix direction rebond
-			if (material.smoothness > 1 - 1e-3) {
+			if (material.smoothness > 1 - EPS) {
 				ray.dir = specularDir;
-			} else if (material.smoothness < 1e-3) {
+			} else if (material.smoothness < EPS) {
 				ray.dir = diffuseDir;
 			} else {
 				ray.dir = normalize(lerp(specularDir, diffuseDir, material.smoothness));
 			}
 		}
 	}
-	
-	if (any(isnan(incomingLight))) { return float3(0.0, 10000000., .0); }
-	
+		
 	return incomingLight;
 }
 
@@ -963,8 +964,8 @@ float3 getOnlyColorMesh(Ray ray, constant Sphere* spheres, int nbSpheres, consta
 	return SKY_COLOR_ZENITH;
 }
 
-float3 getOnlyColorV3(Ray ray, constant Sphere* spheres, int nbSpheres, constant Triangle* triangles, int nbTriangles, constant Node* nodes, int nbNodes) {
-	struct RayHit rayHit = rayCollisionAllV3(ray, spheres, nbSpheres, triangles, nbTriangles, nodes, nbNodes);
+float3 getOnlyColorV3(Ray ray, constant Sphere* spheres, int nbSpheres, constant Triangle* triangles, int nbTriangles, constant Node* nodes, int nbNodes, thread Stats* stats) {
+	struct RayHit rayHit = rayCollisionAllV3(ray, spheres, nbSpheres, triangles, nbTriangles, nodes, nbNodes, stats);
 	
 	if (rayHit.hit) {
 //		return rayHit.material.emitingStrength < EPS ? rayHit.material.color : rayHit.material.emitingColor;
@@ -981,9 +982,8 @@ float3 getRayDir(float x, float y, float3 topLeft, float3 vx, float3 vy, float3 
 	return normalize(pointOnViewport - cameraPos);
 }
 
-//struct DebugParameters {
-//
-//}
+
+
 
 //MARK: Main
 fragment float4 fragment_main(VertexOut in [[stage_in]],
@@ -998,7 +998,7 @@ fragment float4 fragment_main(VertexOut in [[stage_in]],
 							  constant int &maxBounce [[buffer(18)]],
 							  constant int &maxBouncePreview [[buffer(19)]],
 							  constant int &raysPerPixel [[buffer(20)]],
-							  device StatsGPU* stats [[buffer(22)]],
+							  device StatsGPU* _stats [[buffer(22)]],
 							  
 							  constant Sphere* spheres [[buffer(2)]],
 							  constant int &nbSpheres [[buffer(3)]],
@@ -1034,8 +1034,16 @@ fragment float4 fragment_main(VertexOut in [[stage_in]],
 	
 	Ray ray = createRay(rayOrigin, rayDir);
 	float3 color;
+	Stats stats;
+	stats.boxTest = 1.;
+	stats.triangleTest = 1.;
+	float maxTest = 200.;
 	
-	if (enableBetterRayTracing) {
+	if (!enableRayTracing && !enableBetterRayTracing) {
+		color = getOnlyColorV3(ray, spheres, nbSpheres, triangles, nbTriangles, nodes, nbNodes, &stats);
+//		color = float3(clamp(stats.boxTest / maxTest, 0., 1.));
+		
+	} else if (enableBetterRayTracing) {
 		float3 totalIncomingLight = float3(0.);
 		for (int rayIndex = 0; rayIndex < raysPerPixel; rayIndex++) {
 			float dx = RandomFloat01(rngState);
@@ -1045,15 +1053,12 @@ fragment float4 fragment_main(VertexOut in [[stage_in]],
 			rayDir = normalize(topLeft + pixelSample.x * vx + pixelSample.y * vy - cameraPos);
 			ray.dir = rayDir;
 			
-			float3 finalColor = getColor(ray, spheres, nbSpheres, triangles, nbTriangles, meshes, nbMeshes, nodes, nbNodes, maxBounce, rngState);
+			float3 finalColor = getColor(ray, spheres, nbSpheres, triangles, nbTriangles, nodes, nbNodes, &stats, maxBounce, rngState);
 			totalIncomingLight += finalColor;
 		}
 		color = totalIncomingLight / raysPerPixel;
 	} else if (enableRayTracing) {
-		color = getColor(ray, spheres, nbSpheres, triangles, nbTriangles, meshes, nbMeshes, nodes, nbNodes, maxBouncePreview, rngState);
-	} else {
-		color = getOnlyColorV3(ray, spheres, nbSpheres, triangles, nbTriangles, nodes, nbNodes);
-//		color = getOnlyColorMesh(ray, spheres, nbSpheres, triangles, nbTriangles, meshes, nbMeshes, stats);
+		color = getColor(ray, spheres, nbSpheres, triangles, nbTriangles, nodes, nbNodes, &stats, maxBouncePreview, rngState);
 	}
 	
 	if (isAccumulating) {

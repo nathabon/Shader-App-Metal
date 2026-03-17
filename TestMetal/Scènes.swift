@@ -87,7 +87,8 @@ struct Triangle {
 	var B: SIMD3<Float>
 	var C: SIMD3<Float>
 	var n: SIMD3<Float>
-	var material: Material
+//	var material: Material
+	var materialIndex: Int32
 	
 	var baricenter: SIMD3<Float> { return (A + B + C) / 3.0 }
 }
@@ -95,7 +96,7 @@ struct Triangle {
 struct Sphere {
 	var center: SIMD3<Float>
 	var radius: Float
-	var material: Material
+	var materialIndex: Int32
 }
 
 struct Bounds {
@@ -289,6 +290,7 @@ func split(parentIndex: Int, parent node: inout Node, triangles: inout [Triangle
 
 
 struct SceneInfo {
+	var materials: [Material]
 	var spheres: [Sphere]
 	var triangles: [Triangle]
 	var meshes: [MeshInfo]
@@ -306,7 +308,7 @@ func moveTriangles(triangles: [Triangle], move: SIMD3<Float>) -> [Triangle] {
 	var newT: [Triangle] = []
 	
 	for t in triangles {
-		newT.append(Triangle(A: t.A + move, B: t.B + move, C: t.C + move, n: t.n, material: t.material))
+		newT.append(Triangle(A: t.A + move, B: t.B + move, C: t.C + move, n: t.n, materialIndex: t.materialIndex))
 	}
 	
 	return newT
@@ -346,7 +348,7 @@ func scaleTriangles(triangles: [Triangle], scale: Float, centre: SIMD3<Float>) -
 		let A = (t.A - centre) * scale + centre
 		let B = (t.B - centre) * scale + centre
 		let C = (t.C - centre) * scale + centre
-		newT.append(Triangle(A: A, B: B, C: C, n: t.n, material: t.material))
+		newT.append(Triangle(A: A, B: B, C: C, n: t.n, materialIndex: t.materialIndex))
 	}
 	
 	return newT
@@ -384,7 +386,7 @@ func scaleTrianglesInPlace(_ triangles: inout [Triangle], range: Range<Int>, sca
 			B: (t.B - centre) * scale + centre,
 			C: (t.C - centre) * scale + centre,
 			n: t.n,
-			material: t.material
+			materialIndex: t.materialIndex
 		)
 	}
 }
@@ -626,12 +628,18 @@ func loadMesh(named name: String, move: SIMD3<Float>, materials: [String: Materi
 		fatalError("Could not load OBJ file: \(name)")
 	}
 	
+	let materialsSortedNames = materials.keys.sorted()
+	var materialList: [Material] = []
+	for (_, mat) in materials.sorted(by: { $0.key < $1.key }) {
+		materialList.append(mat)
+	}
 	var vertices: [SIMD3<Float>] = []
 	var normals: [SIMD3<Float>] = []
 	var triangles: [Triangle] = []
 	var meshes: [MeshInfo] = []
 	
 	var currentMaterial: Material = .white
+	var currentMaterialName: String = ""
 	var currentMesh = MeshInfo(firstTriangleIndex: 0, nbTriangles: 0, boundMin: .zero, boundMax: .zero)
 	var nextFirstIndex = 0
 	
@@ -707,7 +715,7 @@ func loadMesh(named name: String, move: SIMD3<Float>, materials: [String: Materi
 					B: v1,
 					C: v2,
 					n: normal,
-					material: currentMaterial
+					materialIndex: Int32(materialsSortedNames.firstIndex(of: currentMaterialName)!)
 				)
 				triangles.append(triangle)
 				currentMesh.nbTriangles += 1
@@ -733,6 +741,7 @@ func loadMesh(named name: String, move: SIMD3<Float>, materials: [String: Materi
 		
 		case "usemtl":
 			currentMaterial = materials[String(tokens[1])] ?? .white
+			currentMaterialName = String(tokens[1])
 			
 		default:
 			continue
@@ -749,7 +758,7 @@ func loadMesh(named name: String, move: SIMD3<Float>, materials: [String: Materi
 		meshes.append(currentMesh)
 	}
 	
-	return SceneInfo(spheres: [], triangles: moveTriangles(triangles: triangles, move: move), meshes: meshes)
+	return SceneInfo(materials: materialList, spheres: [], triangles: moveTriangles(triangles: triangles, move: move), meshes: meshes)
 }
 
 
@@ -775,45 +784,45 @@ func combineScenes(scene1: SceneInfo, scene2: SceneInfo) -> SceneInfo {
 
 // MARK: Salle mirroirs
 func loadTrianglesSalleMirroirs() -> [Triangle] {
-	let m = Material.coloredMirror(color: SIMD3(0.98, 0.98, 0.98))
 	return [
 		// MUR DROIT (ROUGE)
-		Triangle(A: SIMD3<Float>(5,0,-5), B: SIMD3<Float>(5,10,-5), C: SIMD3<Float>(5,10,5), n: SIMD3<Float>(-1,0,0), material: m),
-		Triangle(A: SIMD3<Float>(5,10,5), B: SIMD3<Float>(5,0,-5), C: SIMD3<Float>(5,0,5), n: SIMD3<Float>(-1,0,0), material: m),
+		Triangle(A: SIMD3<Float>(5,0,-5), B: SIMD3<Float>(5,10,-5), C: SIMD3<Float>(5,10,5), n: SIMD3<Float>(-1,0,0), materialIndex: Int32(0)), // material m
+		Triangle(A: SIMD3<Float>(5,10,5), B: SIMD3<Float>(5,0,-5), C: SIMD3<Float>(5,0,5), n: SIMD3<Float>(-1,0,0), materialIndex: Int32(0)),
 		// MUR GAUCHE (BLUE)
-		Triangle(A: SIMD3<Float>(-5,0,-5), B: SIMD3<Float>(-5,10,-5), C: SIMD3<Float>(-5,10,5), n: SIMD3<Float>(1,0,0), material: m),
-		Triangle(A: SIMD3<Float>(-5,10,5), B: SIMD3<Float>(-5,0,-5), C: SIMD3<Float>(-5,0,5), n: SIMD3<Float>(1,0,0), material: m),
+		Triangle(A: SIMD3<Float>(-5,0,-5), B: SIMD3<Float>(-5,10,-5), C: SIMD3<Float>(-5,10,5), n: SIMD3<Float>(1,0,0), materialIndex: Int32(0)),
+		Triangle(A: SIMD3<Float>(-5,10,5), B: SIMD3<Float>(-5,0,-5), C: SIMD3<Float>(-5,0,5), n: SIMD3<Float>(1,0,0), materialIndex: Int32(0)),
 		// MUR DU FONC (BLANC)
-		Triangle(A: SIMD3<Float>(-5,0,-5), B: SIMD3<Float>(-5,10,-5), C: SIMD3<Float>(5,0,-5), n: SIMD3<Float>(0,0,1), material: m),
-		Triangle(A: SIMD3<Float>(5,10,-5), B: SIMD3<Float>(-5,10,-5), C: SIMD3<Float>(5,0,-5), n: SIMD3<Float>(0,0,1), material: m),
+		Triangle(A: SIMD3<Float>(-5,0,-5), B: SIMD3<Float>(-5,10,-5), C: SIMD3<Float>(5,0,-5), n: SIMD3<Float>(0,0,1), materialIndex: Int32(0)),
+		Triangle(A: SIMD3<Float>(5,10,-5), B: SIMD3<Float>(-5,10,-5), C: SIMD3<Float>(5,0,-5), n: SIMD3<Float>(0,0,1), materialIndex: Int32(0)),
 		// MUR DE DEVANT (BLANC)
-		Triangle(A: SIMD3<Float>(-5,0,5), B: SIMD3<Float>(-5,10,5), C: SIMD3<Float>(5,0,5), n: SIMD3<Float>(0,0,-1), material: m),
-		Triangle(A: SIMD3<Float>(5,10,5), B: SIMD3<Float>(-5,10,5), C: SIMD3<Float>(5,0,5), n: SIMD3<Float>(0,0,-1), material: m),
+		Triangle(A: SIMD3<Float>(-5,0,5), B: SIMD3<Float>(-5,10,5), C: SIMD3<Float>(5,0,5), n: SIMD3<Float>(0,0,-1), materialIndex: Int32(0)),
+		Triangle(A: SIMD3<Float>(5,10,5), B: SIMD3<Float>(-5,10,5), C: SIMD3<Float>(5,0,5), n: SIMD3<Float>(0,0,-1), materialIndex: Int32(0)),
 		// SOL (GRIS)
-		Triangle(A: SIMD3<Float>(-5,0,-5), B: SIMD3<Float>(5,0,-5), C: SIMD3<Float>(5,0,5), n: SIMD3<Float>(0,1,0), material: .gray),
-		Triangle(A: SIMD3<Float>(-5,0,-5), B: SIMD3<Float>(-5,0,5), C: SIMD3<Float>(5,0,5), n: SIMD3<Float>(0,1,0), material: .gray),
+		Triangle(A: SIMD3<Float>(-5,0,-5), B: SIMD3<Float>(5,0,-5), C: SIMD3<Float>(5,0,5), n: SIMD3<Float>(0,1,0), materialIndex: 1), // material gray
+		Triangle(A: SIMD3<Float>(-5,0,-5), B: SIMD3<Float>(-5,0,5), C: SIMD3<Float>(5,0,5), n: SIMD3<Float>(0,1,0), materialIndex: 1),
 		// PLAFOND (GRIS)
-		Triangle(A: SIMD3<Float>(-5,10,-5), B: SIMD3<Float>(5,10,-5), C: SIMD3<Float>(5,10,5), n: SIMD3<Float>(0,-1,0), material: .gray),
-		Triangle(A: SIMD3<Float>(-5,10,-5), B: SIMD3<Float>(-5,10,5), C: SIMD3<Float>(5,10,5), n: SIMD3<Float>(0,-1,0), material: .gray),
+		Triangle(A: SIMD3<Float>(-5,10,-5), B: SIMD3<Float>(5,10,-5), C: SIMD3<Float>(5,10,5), n: SIMD3<Float>(0,-1,0), materialIndex: 1),
+		Triangle(A: SIMD3<Float>(-5,10,-5), B: SIMD3<Float>(-5,10,5), C: SIMD3<Float>(5,10,5), n: SIMD3<Float>(0,-1,0), materialIndex: 1),
 		// LUMIÈRE
-		Triangle(A: SIMD3<Float>(-3,9.9,-3), B: SIMD3<Float>(3,9.9,-3), C: SIMD3<Float>(3,9.9,3), n: SIMD3<Float>(0,-1,0), material: .light),
-		Triangle(A: SIMD3<Float>(-3,9.9,-3), B: SIMD3<Float>(-3,9.9,3), C: SIMD3<Float>(3,9.9,3), n: SIMD3<Float>(0,-1,0), material: .light),
+		Triangle(A: SIMD3<Float>(-3,9.9,-3), B: SIMD3<Float>(3,9.9,-3), C: SIMD3<Float>(3,9.9,3), n: SIMD3<Float>(0,-1,0), materialIndex: 2), // material light
+		Triangle(A: SIMD3<Float>(-3,9.9,-3), B: SIMD3<Float>(-3,9.9,3), C: SIMD3<Float>(3,9.9,3), n: SIMD3<Float>(0,-1,0), materialIndex: 2),
 	]
 }
 
 func loadSpheresSalleMirroirs() -> [Sphere] {
 	return [
 //		Sphere(center: [0, 5, -3], radius: 1.0, material: .tintedGlass(color: .red)),
-		Sphere(center: [2, 6, -4], radius: 0.8, material: .green),
-		Sphere(center: [-2, 6, -4], radius: 1.0, material: .red),
-		Sphere(center: [0, 3, -4], radius: 0.8, material: .whiteGlass)
+		Sphere(center: [2, 6, -4], radius: 0.8, materialIndex: 3), // material green
+		Sphere(center: [-2, 6, -4], radius: 1.0, materialIndex: 4), // material red
+		Sphere(center: [0, 3, -4], radius: 0.8, materialIndex: 5) // material whiteGlass
 		
 	]
 }
 
 func loadSalleMirroirs() -> SceneInfo {
-	var triangles = loadTrianglesSalleMirroirs()
-	var spheres = loadSpheresSalleMirroirs()
+	let materials = [Material.coloredMirror(color: SIMD3(0.98, 0.98, 0.98)), .gray, .light, .green, .red, .whiteGlass]
+	let triangles = loadTrianglesSalleMirroirs()
+	let spheres = loadSpheresSalleMirroirs()
 	var meshes: [MeshInfo] = []
 	
 	for i in stride(from: 0, to: triangles.count, by: 2) {
@@ -826,33 +835,33 @@ func loadSalleMirroirs() -> SceneInfo {
 		))
 	}
 	
-	return SceneInfo(spheres: spheres, triangles: triangles, meshes: meshes)
+	return SceneInfo(materials: materials, spheres: spheres, triangles: triangles, meshes: meshes)
 }
 
 // MARK: Salle boules miroir
 func loadTrianglesSalleBoulesMiroirs() -> [Triangle] {
 	return [
 		// MUR DROIT (ROUGE)
-		Triangle(A: SIMD3<Float>(5,0,-5), B: SIMD3<Float>(5,10,-5), C: SIMD3<Float>(5,10,5), n: SIMD3<Float>(-1,0,0), material: .red),
-		Triangle(A: SIMD3<Float>(5,10,5), B: SIMD3<Float>(5,0,-5), C: SIMD3<Float>(5,0,5), n: SIMD3<Float>(-1,0,0), material: .red),
+		Triangle(A: SIMD3<Float>(5,0,-5), B: SIMD3<Float>(5,10,-5), C: SIMD3<Float>(5,10,5), n: SIMD3<Float>(-1,0,0), materialIndex: 0), // material red
+		Triangle(A: SIMD3<Float>(5,10,5), B: SIMD3<Float>(5,0,-5), C: SIMD3<Float>(5,0,5), n: SIMD3<Float>(-1,0,0), materialIndex: 0),
 		// MUR GAUCHE (BLUE)
-		Triangle(A: SIMD3<Float>(-5,0,-5), B: SIMD3<Float>(-5,10,-5), C: SIMD3<Float>(-5,10,5), n: SIMD3<Float>(1,0,0), material: .blue),
-		Triangle(A: SIMD3<Float>(-5,10,5), B: SIMD3<Float>(-5,0,-5), C: SIMD3<Float>(-5,0,5), n: SIMD3<Float>(1,0,0), material: .blue),
+		Triangle(A: SIMD3<Float>(-5,0,-5), B: SIMD3<Float>(-5,10,-5), C: SIMD3<Float>(-5,10,5), n: SIMD3<Float>(1,0,0), materialIndex: 1), // material blue
+		Triangle(A: SIMD3<Float>(-5,10,5), B: SIMD3<Float>(-5,0,-5), C: SIMD3<Float>(-5,0,5), n: SIMD3<Float>(1,0,0), materialIndex: 1),
 		// MUR DU FONC (BLANC)
-		Triangle(A: SIMD3<Float>(-5,0,-5), B: SIMD3<Float>(-5,10,-5), C: SIMD3<Float>(5,0,-5), n: SIMD3<Float>(0,0,1), material: .white),
-		Triangle(A: SIMD3<Float>(5,10,-5), B: SIMD3<Float>(-5,10,-5), C: SIMD3<Float>(5,0,-5), n: SIMD3<Float>(0,0,1), material: .white),
+		Triangle(A: SIMD3<Float>(-5,0,-5), B: SIMD3<Float>(-5,10,-5), C: SIMD3<Float>(5,0,-5), n: SIMD3<Float>(0,0,1), materialIndex: 2), // material white
+		Triangle(A: SIMD3<Float>(5,10,-5), B: SIMD3<Float>(-5,10,-5), C: SIMD3<Float>(5,0,-5), n: SIMD3<Float>(0,0,1), materialIndex: 2),
 		// MUR DE DEVANT (BLANC)
-		//		Triangle(A: SIMD3<Float>(-5,0,5), B: SIMD3<Float>(-5,10,5), C: SIMD3<Float>(5,0,5), n: SIMD3<Float>(0,0,-1), material: .mirror),
+		//		Triangle(A: SIMD3<Float>(-5,0,5), B: SIMD3<Float>(-5,10,5), C: SIMD3<Float>(5,0,5), n: SIMD3<Float>(0,0,-1), materialIndex: 5), // material mirror
 		//		Triangle(A: SIMD3<Float>(5,10,5), B: SIMD3<Float>(-5,10,5), C: SIMD3<Float>(5,0,5), n: SIMD3<Float>(0,0,-1), material: .mirror),
 		// SOL (GRIS)
-		Triangle(A: SIMD3<Float>(-5,0,-5), B: SIMD3<Float>(5,0,-5), C: SIMD3<Float>(5,0,5), n: SIMD3<Float>(0,1,0), material: .gray),
-		Triangle(A: SIMD3<Float>(-5,0,-5), B: SIMD3<Float>(-5,0,5), C: SIMD3<Float>(5,0,5), n: SIMD3<Float>(0,1,0), material: .gray),
+		Triangle(A: SIMD3<Float>(-5,0,-5), B: SIMD3<Float>(5,0,-5), C: SIMD3<Float>(5,0,5), n: SIMD3<Float>(0,1,0), materialIndex: 3), // material gray
+		Triangle(A: SIMD3<Float>(-5,0,-5), B: SIMD3<Float>(-5,0,5), C: SIMD3<Float>(5,0,5), n: SIMD3<Float>(0,1,0), materialIndex: 3),
 		// PLAFOND (GRIS)
-		Triangle(A: SIMD3<Float>(-5,10,-5), B: SIMD3<Float>(5,10,-5), C: SIMD3<Float>(5,10,5), n: SIMD3<Float>(0,-1,0), material: .gray),
-		Triangle(A: SIMD3<Float>(-5,10,-5), B: SIMD3<Float>(-5,10,5), C: SIMD3<Float>(5,10,5), n: SIMD3<Float>(0,-1,0), material: .gray),
+		Triangle(A: SIMD3<Float>(-5,10,-5), B: SIMD3<Float>(5,10,-5), C: SIMD3<Float>(5,10,5), n: SIMD3<Float>(0,-1,0), materialIndex: 3),
+		Triangle(A: SIMD3<Float>(-5,10,-5), B: SIMD3<Float>(-5,10,5), C: SIMD3<Float>(5,10,5), n: SIMD3<Float>(0,-1,0), materialIndex: 3),
 		// LUMIÈRE
-		Triangle(A: SIMD3<Float>(-2,9.9,-3), B: SIMD3<Float>(2,9.9,-3), C: SIMD3<Float>(2,9.9,3), n: SIMD3<Float>(0,-1,0), material: .light),
-		Triangle(A: SIMD3<Float>(-2,9.9,-3), B: SIMD3<Float>(-2,9.9,3), C: SIMD3<Float>(2,9.9,3), n: SIMD3<Float>(0,-1,0), material: .light),
+		Triangle(A: SIMD3<Float>(-2,9.9,-3), B: SIMD3<Float>(2,9.9,-3), C: SIMD3<Float>(2,9.9,3), n: SIMD3<Float>(0,-1,0), materialIndex: 4), // metarial light
+		Triangle(A: SIMD3<Float>(-2,9.9,-3), B: SIMD3<Float>(-2,9.9,3), C: SIMD3<Float>(2,9.9,3), n: SIMD3<Float>(0,-1,0), materialIndex: 4),
 	]
 }
 
@@ -866,14 +875,15 @@ func loadSpheresSalleBoulesMiroir() -> [Sphere] {
 //		Sphere(center: [10/6 * 3, 5, -3], radius: 0.5, material: .whiteReflective(smooth: 1)),
 		
 //		Sphere(center: [0, 5, -3], radius: 1.0, material: .tintedGlass(color: .red)),
-		Sphere(center: [-2, 6, -4], radius: 1.0, material: .mirror),
-		Sphere(center: [2, 6, -4], radius: 0.8, material: .whiteGlass)
+		Sphere(center: [-2, 6, -4], radius: 1.0, materialIndex: 4), // material light
+		Sphere(center: [2, 6, -4], radius: 0.8, materialIndex: 5) // material whiteGlass
 	]
 }
 
 func loadSalleBoules() -> SceneInfo {
-	var triangles = loadTrianglesSalleBoulesMiroirs()
-	var spheres = loadSpheresSalleBoulesMiroir()
+	let materials: [Material] = [.red, .blue, .white, .gray, .light, .whiteGlass]
+	let triangles = loadTrianglesSalleBoulesMiroirs()
+	let spheres = loadSpheresSalleBoulesMiroir()
 	var meshes: [MeshInfo] = []
 	
 	for i in stride(from: 0, to: triangles.count, by: 2) {
@@ -886,30 +896,30 @@ func loadSalleBoules() -> SceneInfo {
 		))
 	}
 	
-	return SceneInfo(spheres: spheres, triangles: triangles, meshes: meshes)
+	return SceneInfo(materials: materials, spheres: spheres, triangles: triangles, meshes: meshes)
 }
 
 // MARK: Salle exposition
 func loadTrianglesSalleExposition() -> [Triangle] {
 	return [
 		// MUR DROIT (ROUGE)
-		Triangle(A: SIMD3<Float>(5,0,-5), B: SIMD3<Float>(5,10,-5), C: SIMD3<Float>(5,10,5), n: SIMD3<Float>(-1,0,0), material: .red),
-		Triangle(A: SIMD3<Float>(5,10,5), B: SIMD3<Float>(5,0,-5), C: SIMD3<Float>(5,0,5), n: SIMD3<Float>(-1,0,0), material: .red),
+		Triangle(A: SIMD3<Float>(5,0,-5), B: SIMD3<Float>(5,10,-5), C: SIMD3<Float>(5,10,5), n: SIMD3<Float>(-1,0,0), materialIndex: 0), // material red
+		Triangle(A: SIMD3<Float>(5,10,5), B: SIMD3<Float>(5,0,-5), C: SIMD3<Float>(5,0,5), n: SIMD3<Float>(-1,0,0), materialIndex: 0),
 		// MUR GAUCHE (BLUE)
-		Triangle(A: SIMD3<Float>(-5,0,-5), B: SIMD3<Float>(-5,10,-5), C: SIMD3<Float>(-5,10,5), n: SIMD3<Float>(1,0,0), material: .blue),
-		Triangle(A: SIMD3<Float>(-5,10,5), B: SIMD3<Float>(-5,0,-5), C: SIMD3<Float>(-5,0,5), n: SIMD3<Float>(1,0,0), material: .blue),
+		Triangle(A: SIMD3<Float>(-5,0,-5), B: SIMD3<Float>(-5,10,-5), C: SIMD3<Float>(-5,10,5), n: SIMD3<Float>(1,0,0), materialIndex: 1), // material blue
+		Triangle(A: SIMD3<Float>(-5,10,5), B: SIMD3<Float>(-5,0,-5), C: SIMD3<Float>(-5,0,5), n: SIMD3<Float>(1,0,0), materialIndex: 1),
 		// MUR DU FONC (BLANC)
-		Triangle(A: SIMD3<Float>(-5,0,-5), B: SIMD3<Float>(-5,10,-5), C: SIMD3<Float>(5,0,-5), n: SIMD3<Float>(0,0,1), material: .white),
-		Triangle(A: SIMD3<Float>(5,10,-5), B: SIMD3<Float>(-5,10,-5), C: SIMD3<Float>(5,0,-5), n: SIMD3<Float>(0,0,1), material: .white),
+		Triangle(A: SIMD3<Float>(-5,0,-5), B: SIMD3<Float>(-5,10,-5), C: SIMD3<Float>(5,0,-5), n: SIMD3<Float>(0,0,1), materialIndex: 2), // material white
+		Triangle(A: SIMD3<Float>(5,10,-5), B: SIMD3<Float>(-5,10,-5), C: SIMD3<Float>(5,0,-5), n: SIMD3<Float>(0,0,1), materialIndex: 2),
 		// MUR DE DEVANT (BLANC)
 		//		Triangle(A: SIMD3<Float>(-5,0,5), B: SIMD3<Float>(-5,10,5), C: SIMD3<Float>(5,0,5), n: SIMD3<Float>(0,0,-1), material: .mirror),
 		//		Triangle(A: SIMD3<Float>(5,10,5), B: SIMD3<Float>(-5,10,5), C: SIMD3<Float>(5,0,5), n: SIMD3<Float>(0,0,-1), material: .mirror),
 		// SOL (GRIS)
-		Triangle(A: SIMD3<Float>(-5,0,-5), B: SIMD3<Float>(5,0,-5), C: SIMD3<Float>(5,0,5), n: SIMD3<Float>(0,1,0), material: .gray),
-		Triangle(A: SIMD3<Float>(-5,0,-5), B: SIMD3<Float>(-5,0,5), C: SIMD3<Float>(5,0,5), n: SIMD3<Float>(0,1,0), material: .gray),
+		Triangle(A: SIMD3<Float>(-5,0,-5), B: SIMD3<Float>(5,0,-5), C: SIMD3<Float>(5,0,5), n: SIMD3<Float>(0,1,0), materialIndex: 3), // material gray
+		Triangle(A: SIMD3<Float>(-5,0,-5), B: SIMD3<Float>(-5,0,5), C: SIMD3<Float>(5,0,5), n: SIMD3<Float>(0,1,0), materialIndex: 3),
 		// PLAFOND (GRIS)
-		Triangle(A: SIMD3<Float>(-5,10,-5), B: SIMD3<Float>(5,10,-5), C: SIMD3<Float>(5,10,5), n: SIMD3<Float>(0,-1,0), material: .gray),
-		Triangle(A: SIMD3<Float>(-5,10,-5), B: SIMD3<Float>(-5,10,5), C: SIMD3<Float>(5,10,5), n: SIMD3<Float>(0,-1,0), material: .gray),
+		Triangle(A: SIMD3<Float>(-5,10,-5), B: SIMD3<Float>(5,10,-5), C: SIMD3<Float>(5,10,5), n: SIMD3<Float>(0,-1,0), materialIndex: 3),
+		Triangle(A: SIMD3<Float>(-5,10,-5), B: SIMD3<Float>(-5,10,5), C: SIMD3<Float>(5,10,5), n: SIMD3<Float>(0,-1,0), materialIndex: 3),
 		// LUMIÈRE (MUR DROIT)
 //		Triangle(A: SIMD3<Float>(4.9,2.5,-2.5), B: SIMD3<Float>(4.9,7.5,-2.5), C: SIMD3<Float>(4.9,7.5,2.5), n: SIMD3<Float>(1,0,0), material: .light),
 //		Triangle(A: SIMD3<Float>(4.9,7.5,2.5), B: SIMD3<Float>(4.9,2.5,-2.5), C: SIMD3<Float>(4.9,2.5,2.5), n: SIMD3<Float>(1,0,0), material: .light),
@@ -918,18 +928,19 @@ func loadTrianglesSalleExposition() -> [Triangle] {
 
 func loadSpheresSalleExposition() -> [Sphere] {
 	return [
-		Sphere(center: [-10/6 * 3, 5, -3], radius: 0.5, material: .whiteReflective(smooth: 0)),
-		Sphere(center: [-10/6 * 2, 5, -3], radius: 0.5, material: .whiteReflective(smooth: 0.2)),
-		Sphere(center: [-10/6, 5, -3], radius: 0.5, material: .whiteReflective(smooth: 0.4)),
-		Sphere(center: [10/6, 5, -3], radius: 0.5, material: .whiteReflective(smooth: 0.6)),
-		Sphere(center: [10/6 * 2, 5, -3], radius: 0.5, material: .whiteReflective(smooth: 0.8)),
-		Sphere(center: [10/6 * 3, 5, -3], radius: 0.5, material: .whiteReflective(smooth: 1)),
+		Sphere(center: [-10/6 * 3, 5, -3], radius: 0.5, materialIndex: 4),
+		Sphere(center: [-10/6 * 2, 5, -3], radius: 0.5, materialIndex: 5),
+		Sphere(center: [-10/6, 5, -3], radius: 0.5, materialIndex: 6),
+		Sphere(center: [10/6, 5, -3], radius: 0.5, materialIndex: 7),
+		Sphere(center: [10/6 * 2, 5, -3], radius: 0.5, materialIndex: 8),
+		Sphere(center: [10/6 * 3, 5, -3], radius: 0.5, materialIndex: 9),
 	]
 }
 
 func loadSalleExposition() -> SceneInfo {
-	var triangles = loadTrianglesSalleExposition()
-	var spheres: [Sphere] = []
+	let materials: [Material] = [.red, .blue, .white, .gray, .whiteReflective(smooth: 0), .whiteReflective(smooth: 0.2), .whiteReflective(smooth: 0.4), .whiteReflective(smooth: 0.6), .whiteReflective(smooth: 0.8), .whiteReflective(smooth: 1)]
+	let triangles = loadTrianglesSalleExposition()
+	let spheres: [Sphere] = []
 	var meshes: [MeshInfo] = []
 	
 	for i in stride(from: 0, to: triangles.count, by: 2) {
@@ -942,68 +953,5 @@ func loadSalleExposition() -> SceneInfo {
 		))
 	}
 	
-	return SceneInfo(spheres: spheres, triangles: triangles, meshes: meshes)
+	return SceneInfo(materials: materials, spheres: spheres, triangles: triangles, meshes: meshes)
 }
-
-
-// MARK: Plan 200 boules
-func loadTrianglesPlan200Boules() -> [Triangle] {
-	return [
-		Triangle(A: SIMD3<Float>(-50,0,-50), B: SIMD3<Float>(50,0,-50), C: SIMD3<Float>(50,0,50), n: SIMD3<Float>(0,1,0), material: .gray),
-		Triangle(A: SIMD3<Float>(-50,0,-50), B: SIMD3<Float>(-50,0,50), C: SIMD3<Float>(50,0,50), n: SIMD3<Float>(0,1,0), material: .gray),
-	]
-}
-
-func loadSpheresPlan200Boules() -> [Sphere] {
-	return [
-		// Soleil
-		Sphere(center: SIMD3<Float>(0, 2000, 0), radius: 1000.0, material: .light),
-		
-		// 3 grandes sphères centrales
-		Sphere(center: SIMD3<Float>(0, 1, 0), radius: 1.0, material: .whiteReflective(smooth: 1.0)),         // Miroir (au centre)
-		Sphere(center: SIMD3<Float>(-4, 1, 0), radius: 1.0, material: .coloredMirror(color: SIMD3<Float>(0.8, 0.2, 0.1))),  // Métal brun
-		Sphere(center: SIMD3<Float>(4, 1, 0), radius: 1.0, material: Material(color: SIMD3<Float>(0.4, 0.6, 0.9), emitingColor: .black, emitingStrength: 0, smoothness: 0.0)), // Diffus bleu clair
-		
-		// Petites sphères aléatoires
-	] + (0..<200).compactMap { _ -> Sphere? in
-		let a = Float.random(in: -11...11)
-		let b = Float.random(in: -11...11)
-		let center = SIMD3<Float>(a, 0.2, b)
-		
-		// On évite les sphères trop proches des grosses
-		if simd_length(center - SIMD3<Float>(4, 0.2, 0)) < 1.0 || simd_length(center - SIMD3<Float>(0, 0.2, 0)) < 1.0 || simd_length(center - SIMD3<Float>(-4, 0.2, 0)) < 1.0 {
-			return nil
-		}
-		
-		let chooseMat = Float.random(in: 0...1)
-		if chooseMat < 0.8 {
-			// Diffuse
-			let color = SIMD3<Float>(Float.random(in: 0.5...1.0), Float.random(in: 0.5...1.0), Float.random(in: 0.5...1.0))
-			return Sphere(center: center, radius: 0.2, material: Material(color: color, emitingColor: .black, emitingStrength: 0, smoothness: 0))
-		} else if chooseMat < 0.95 {
-			// Métal
-			let color = SIMD3<Float>(Float.random(in: 0.5...1.0), Float.random(in: 0.5...1.0), Float.random(in: 0.5...1.0))
-			return Sphere(center: center, radius: 0.2, material: Material(color: color, emitingColor: .black, emitingStrength: 0, smoothness: 1.0))
-		} else {
-			// Transparent (on pourrait simuler du verre si ton moteur supporte)
-			let color = SIMD3<Float>(1.0, 1.0, 1.0)
-			return Sphere(center: center, radius: 0.2, material: Material(color: color, emitingColor: .black, emitingStrength: 0, smoothness: 1.0))
-		}
-	}
-}
-
-func loadScenePlan200Boules() -> SceneInfo {
-    let triangles = loadTrianglesPlan200Boules()
-    let spheres = loadSpheresPlan200Boules()
-    var meshes: [MeshInfo] = []
-    // Création d'un seul mesh contenant tous les triangles
-    let bounds = getBounds(triangles: triangles)
-    meshes.append(MeshInfo(
-        firstTriangleIndex: 0,
-        nbTriangles: Int32(triangles.count),
-        boundMin: bounds.min,
-        boundMax: bounds.max
-    ))
-    return SceneInfo(spheres: spheres, triangles: triangles, meshes: meshes)
-}
-

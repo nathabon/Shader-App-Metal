@@ -102,6 +102,7 @@ func makeDefaultScene() -> SceneInfo {
 }
 
 let scene = makeDefaultScene()
+var materials = scene.materials
 var spheres: [Sphere] = scene.spheres/* + [Sphere(center: SIMD3<Float>(10, 2, 0), radius: 2, material: .whiteGlass), Sphere(center: SIMD3<Float>(3, 4, 0), radius: 1, material: .light)]*/
 var triangles: [Triangle] = scene.triangles
 var meshes = scene.meshes
@@ -119,6 +120,7 @@ class Renderer: NSObject, MTKViewDelegate, ObservableObject {
 	private var pipelineStateDisplay: MTLRenderPipelineState!
 	
 	private var statsBuffer: MTLBuffer!
+	private let materialsBuffer: MTLBuffer
 	private let spheresBuffer: MTLBuffer?
 	private let trianglesBuffer: MTLBuffer
 	private let meshesBuffer: MTLBuffer
@@ -244,6 +246,12 @@ class Renderer: NSObject, MTKViewDelegate, ObservableObject {
 		pipelineDescriptor.vertexFunction = vertexFunction
 		pipelineDescriptor.fragmentFunction = fragmentFunction
 		pipelineDescriptor.colorAttachments[0].pixelFormat = metalView.colorPixelFormat
+		
+		materialsBuffer = device.makeBuffer(
+			bytes: materials,
+			length: MemoryLayout<Material>.stride * materials.count,
+			options: [.storageModeShared]
+		)!
 		
 		spheresBuffer = device.makeBuffer(
 			bytes: spheres,
@@ -538,6 +546,9 @@ class Renderer: NSObject, MTKViewDelegate, ObservableObject {
 				// Fragments
 				enc.setFragmentBytes(&resolution, length: MemoryLayout<SIMD2<Float>>.stride, index: 0)
 				enc.setFragmentBytes(&cameraPosition, length: MemoryLayout<SIMD3<Float>>.stride, index: 1)
+				enc.setFragmentBuffer(materialsBuffer, offset: 0, index: 23)
+				var nbMaterialsU32: UInt32 = UInt32(materials.count)
+				enc.setFragmentBytes(&nbMaterialsU32, length: MemoryLayout<UInt32>.stride, index: 24)
 				enc.setFragmentBuffer(spheresBuffer, offset: 0, index: 2)
 				var nbSpheresU32: UInt32 = UInt32(spheres.count)
 				enc.setFragmentBytes(&nbSpheresU32, length: MemoryLayout<UInt32>.stride, index: 3)
@@ -689,6 +700,9 @@ class Renderer: NSObject, MTKViewDelegate, ObservableObject {
 		// Fragments
 		renderEncoder.setFragmentBytes(&resolution, length: MemoryLayout<SIMD2<Float>>.stride, index: 0)
 		renderEncoder.setFragmentBytes(&cameraPosition, length: MemoryLayout<SIMD3<Float>>.stride, index: 1)
+		renderEncoder.setFragmentBuffer(materialsBuffer, offset: 0, index: 23)
+		var nbMaterialsU32: UInt32 = UInt32(materials.count)
+		renderEncoder.setFragmentBytes(&nbMaterialsU32, length: MemoryLayout<UInt32>.stride, index: 24)
 		renderEncoder.setFragmentBuffer(spheresBuffer, offset: 0, index: 2)
 		var nbSpheresU32: UInt32 = UInt32(spheres.count)
 		renderEncoder.setFragmentBytes(&nbSpheresU32, length: MemoryLayout<UInt32>.stride, index: 3)

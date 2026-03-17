@@ -30,7 +30,7 @@ struct StatsNodes {
 
 
 func makeDefaultScene() -> SceneInfo {
-	var scene = loadMesh(named: "dragon_80k")
+	var scene = loadMesh(named: "SalleCheval")
 //	var scene = loadSalleMirroirs()
 //	var scene = loadMesh(named: "SalleCheval")
 //	var scene = loadSalleBoules()
@@ -49,17 +49,40 @@ func makeDefaultScene() -> SceneInfo {
 	var stats = StatsNodes()
 	let dtime = Date().timeIntervalSince1970
 	
-	for mesh in scene.meshes {
-		var root = Node(childIndex: Int32(nodes.count), triangleIndex: mesh.firstTriangleIndex, nbTriangles: Int32(mesh.nbTriangles), depth: 0, bounds: Bounds(boundMin: mesh.boundMin, boundMax: mesh.boundMax))
+	for i in 0..<scene.meshes.count {
+		var mesh = scene.meshes[i]
+		scene.meshes[i].firstNodeIndex = Int32(nodes.count)
+		var root = Node(
+			childIndex: Int32(nodes.count),
+			triangleIndex: mesh.firstTriangleIndex,
+			nbTriangles: Int32(mesh.nbTriangles),
+			depth: 0,
+			bounds: Bounds(boundMin: mesh.boundMin, boundMax: mesh.boundMax)
+		)
 		nodes.append(root)
-		
-		split(parentIndex: Int32(nodes.count-1), parent: &root, triangles: &scene.triangles[mesh.firstTriangleIndex:mesh.firstTriangleIndex+mesh.nbTriangles], depth: 0, maxDepth: 32, stats: &stats)
+
+		split(
+			parentIndex: nodes.count - 1,
+			parent: &root,
+			triangles: &scene.triangles,
+			nodes: &nodes,
+			depth: 0,
+			maxDepth: 32,
+			stats: &stats
+		)
+	}
+	print("ici")
+	for mesh in scene.meshes {
+		let node = nodes[Int(mesh.firstNodeIndex)]
+		print(node)
 	}
 	
-	var root = Node(childIndex: 0, triangleIndex: 0, nbTriangles: Int32(scene.triangles.count), depth: 0, bounds: bound)
-	nodes.append(root)
+	print(scene.meshes)
 	
-	split(parentIndex: 0, parent: &root, triangles: &scene.triangles, nodes: &nodes, depth: 0, maxDepth: 32, stats: &stats)
+//	var root = Node(childIndex: 0, triangleIndex: 0, nbTriangles: Int32(scene.triangles.count), depth: 0, bounds: bound)
+//	nodes.append(root)
+//	
+//	split(parentIndex: 0, parent: &root, triangles: &scene.triangles, nodes: &nodes, depth: 0, maxDepth: 32, stats: &stats)
 	let ftime = Date().timeIntervalSince1970
 	let time = ftime - dtime
 

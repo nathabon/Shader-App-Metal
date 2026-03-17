@@ -121,9 +121,10 @@ struct Bounds {
 }
 
 struct MeshInfo: Equatable {
-//	var name: String = ""
 	var firstTriangleIndex: Int32 = Int32(0)
 	var nbTriangles: Int32 = Int32(0)
+	var firstNodeIndex: Int32 = Int32(0)
+	var nbNodes: Int32 = Int32(0)
 	var boundMin: SIMD3<Float>
 	var boundMax: SIMD3<Float>
 	
@@ -166,6 +167,8 @@ func getMean(_ points: [SIMD3<Float>]) -> SIMD3<Float>{
 //MARK: Split
 func split(parentIndex: Int, parent node: inout Node, triangles: inout [Triangle], nodes: inout [Node], depth: Int, maxDepth: Int, stats: inout StatsNodes) {
     if depth >= maxDepth || node.nbTriangles <= 2 {
+		node.childIndex = 0
+		nodes[parentIndex] = node
         stats.nbLeafs += 1
         stats.maxTriangles = max(stats.maxTriangles, Int(node.nbTriangles))
         stats.maxDepth = max(stats.maxDepth, Int(node.depth))

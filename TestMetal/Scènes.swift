@@ -9,7 +9,6 @@ import Foundation
 import Foundation
 import simd
 
-/// Clamps a value between a minimum and maximum.
 func clamp<T: Comparable>(_ value: T, _ minValue: T, _ maxValue: T) -> T {
     return min(max(value, minValue), maxValue)
 }
@@ -119,6 +118,12 @@ struct Bounds {
 		if point.z > boundMax.z { boundMax.z = point.z }
 	}
 	
+	func getArea() -> Float {
+		let dx = boundMax.x - boundMin.x
+		let dy = boundMax.y - boundMin.y
+		let dz = boundMax.z - boundMin.z
+		return dx * (dy + dz) + dy * dz
+	}
 }
 
 struct MeshInfo: Equatable {
@@ -165,6 +170,137 @@ func getMean(_ points: [SIMD3<Float>]) -> SIMD3<Float>{
 }
 
 
+
+//MARK: choseSplit
+func choseSplitMiddle(node: Node, triangles: [Triangle]) -> (Int, Float, Float) {
+	let start = Int(node.triangleIndex)
+	let count = Int(node.nbTriangles)
+	let end   = start + count
+	
+	let dx = node.bounds.boundMax.x - node.bounds.boundMin.x
+	let dy = node.bounds.boundMax.y - node.bounds.boundMin.y
+	let dz = node.bounds.boundMax.z - node.bounds.boundMin.z
+	
+	var side = -1
+	var center = 0.0 as Float
+	if (dx > dy) {
+		if (dx > dz) {
+			side = 0
+//			center = node.barycentre.x
+		} else {
+			side = 2
+//			center = node.barycentre.z
+		}
+	} else {
+		if (dy > dz) {
+			side = 1
+//			center = node.barycentre.y
+		} else {
+			side = 2
+//			center = node.barycentre.z
+		}
+	}
+	
+	let cost = Float(node.nbTriangles) * node.bounds.getArea()
+	
+	return (side, node.barycentre[side], cost)
+}
+
+func choseSplitMean(node: Node, triangles: [Triangle]) -> (Int, Float, Float) {
+	let start = Int(node.triangleIndex)
+	let count = Int(node.nbTriangles)
+	let end   = start + count
+	
+	let dx = node.bounds.boundMax.x - node.bounds.boundMin.x
+	let dy = node.bounds.boundMax.y - node.bounds.boundMin.y
+	let dz = node.bounds.boundMax.z - node.bounds.boundMin.z
+	
+	var side = -1
+	var center = 0.0 as Float
+	if (dx > dy) {
+		if (dx > dz) {
+			side = 0
+			center = node.barycentre.x
+		} else {
+			side = 2
+			center = node.barycentre.z
+		}
+	} else {
+		if (dy > dz) {
+			side = 1
+			center = node.barycentre.y
+		} else {
+			side = 2
+			center = node.barycentre.z
+		}
+	}
+	
+	let _center2 = getMean(triangles[start..<end].map(\.baricenter))
+	var center2 = _center2[side]
+//	if side == 0 {
+//		center2 = _center2.x
+//	} else if side == 2 {
+//		center2 = _center2.y
+//	} else {
+//		center2 = _center2.z
+//	}
+	
+	let cost = Float(node.nbTriangles) * node.bounds.getArea()
+	
+	return (side, center2, cost)
+}
+
+func choseSplitHeuristic(node: Node, triangles: [Triangle]) -> (Int, Float, Float) {
+	let start = Int(node.triangleIndex)
+	let count = Int(node.nbTriangles)
+	let end   = start + count
+	
+	let dx = node.bounds.boundMax.x - node.bounds.boundMin.x
+	let dy = node.bounds.boundMax.y - node.bounds.boundMin.y
+	let dz = node.bounds.boundMax.z - node.bounds.boundMin.z
+	let delta = SIMD3<Float>(dx, dy, dz)
+	
+	let nbTest = 3
+	var bestCost: Float = .greatestFiniteMagnitude
+	var bestCut = 0 as Float
+	var bestSide = 0
+	for side in 0..<3 {
+		for i in 0..<nbTest {
+			let splitT = Float(i+1) / Float(nbTest + 1)
+			let splitPos = node.bounds.boundMin[side] + splitT * delta[side]
+			
+			var boundLeft  = Bounds.empty
+			var nbInLeft   = 0
+			var boundRight = Bounds.empty
+			var nbInRight  = 0
+			
+			for t in start..<end {
+				let bary = triangles[t].baricenter
+				if bary[side] < splitPos {
+					boundLeft.growToInclude(triangles[t].A)
+					boundLeft.growToInclude(triangles[t].B)
+					boundLeft.growToInclude(triangles[t].C)
+					nbInLeft += 1
+				} else {
+					boundRight.growToInclude(triangles[t].A)
+					boundRight.growToInclude(triangles[t].B)
+					boundRight.growToInclude(triangles[t].C)
+					nbInRight += 1
+				}
+			}
+			
+			let cost = Float(nbInLeft) * boundLeft.getArea() + Float(nbInRight) * boundRight.getArea()
+			if cost < bestCost {
+				bestCost = cost
+				bestCut  = splitPos
+				bestSide = side
+			}
+			
+		}
+	}
+	return (bestSide, bestCut, bestCost)
+}
+
 //MARK: Split
 func split(parentIndex: Int, parent node: inout Node, triangles: inout [Triangle], nodes: inout [Node], depth: Int, maxDepth: Int, stats: inout StatsNodes) {
     if depth >= maxDepth || node.nbTriangles <= 2 {
@@ -176,56 +312,19 @@ func split(parentIndex: Int, parent node: inout Node, triangles: inout [Triangle
         return
     }
     
-    let start = Int(node.triangleIndex)
-    let count = Int(node.nbTriangles)
-    let end   = start + count
     
-    let dx = node.bounds.boundMax.x - node.bounds.boundMin.x
-    let dy = node.bounds.boundMax.y - node.bounds.boundMin.y
-    let dz = node.bounds.boundMax.z - node.bounds.boundMin.z
-    
-    var side = 0
-    var center = 0.0 as Float
-    if (dx > dy) {
-        if (dx > dz) {
-            side = 1
-            center = node.barycentre.x
-        } else {
-            side = 3
-            center = node.barycentre.z
-        }
-    } else {
-        if (dy > dz) {
-            side = 2
-            center = node.barycentre.y
-        } else {
-            side = 3
-            center = node.barycentre.z
-        }
-    }
-	
-	let _center2 = getMean(triangles[start..<end].map(\.baricenter))
-	var center2 = center
-	if side == 1 {
-		center2 = _center2.x
-	} else if side == 2 {
-		center2 = _center2.y
-	} else {
-		center2 = _center2.z
-	}
+	let start = Int(node.triangleIndex)
+	let count = Int(node.nbTriangles)
+	let end   = start + count
+	let (side, center, cost) = choseSplitHeuristic(node: node, triangles: triangles)
+	stats.cost += cost
     
     var leftCount = 0
     var i = start
     var j = end - 1
     while i <= j {
         let t = triangles[i]
-        let goesLeft: Bool = {
-            switch side {
-            case 1: return t.baricenter.x < center2
-            case 2: return t.baricenter.y < center2
-            default: return t.baricenter.z < center2
-            }
-        }()
+		let goesLeft = t.baricenter[side] < center
         
         if goesLeft {
             i += 1
@@ -296,7 +395,6 @@ struct SceneInfo {
 	var meshes: [MeshInfo]
 	var nodes: [Node]?
 }
-
 
 
 func pointInBounds(point p: SIMD3<Float>, bounds b: (min: SIMD3<Float>, max: SIMD3<Float>)) -> Bool {
@@ -627,19 +725,27 @@ func loadMesh(named name: String, move: SIMD3<Float>, materials: [String: Materi
 		  let content = try? String(contentsOf: url) else {
 		fatalError("Could not load OBJ file: \(name)")
 	}
-	
+	var materials = materials
+	if materials.keys.count == 0 {
+		materials["white"] = .white
+	}
 	let materialsSortedNames = materials.keys.sorted()
 	var materialList: [Material] = []
 	for (_, mat) in materials.sorted(by: { $0.key < $1.key }) {
 		materialList.append(mat)
 	}
+	
+//	if materialList.count == 0 {
+//		materialList = [.white]
+//	}
+	
 	var vertices: [SIMD3<Float>] = []
 	var normals: [SIMD3<Float>] = []
 	var triangles: [Triangle] = []
 	var meshes: [MeshInfo] = []
 	
 	var currentMaterial: Material = .white
-	var currentMaterialName: String = ""
+	var currentMaterialName: String = "white"
 	var currentMesh = MeshInfo(firstTriangleIndex: 0, nbTriangles: 0, boundMin: .zero, boundMax: .zero)
 	var nextFirstIndex = 0
 	
@@ -709,13 +815,15 @@ func loadMesh(named name: String, move: SIMD3<Float>, materials: [String: Materi
 				} else {
 					normal = normalize(cross(v1 - v0, v2 - v0))
 				}
-				
-				let triangle = Triangle(
+//				print(currentMaterialName)
+//				print(materialsSortedNames)
+//				print(materials)
+				let triangle = try Triangle(
 					A: v0,
 					B: v1,
 					C: v2,
 					n: normal,
-					materialIndex: Int32(materialsSortedNames.firstIndex(of: currentMaterialName)!)
+					materialIndex: try Int32(materialsSortedNames.firstIndex(of: currentMaterialName)!)
 				)
 				triangles.append(triangle)
 				currentMesh.nbTriangles += 1
@@ -786,11 +894,11 @@ func combineScenes(scene1: SceneInfo, scene2: SceneInfo) -> SceneInfo {
 func loadTrianglesSalleMirroirs() -> [Triangle] {
 	return [
 		// MUR DROIT (ROUGE)
-		Triangle(A: SIMD3<Float>(5,0,-5), B: SIMD3<Float>(5,10,-5), C: SIMD3<Float>(5,10,5), n: SIMD3<Float>(-1,0,0), materialIndex: Int32(0)), // material m
+		Triangle(A: SIMD3<Float>(5,0,-5), B: SIMD3<Float>(5,10,-5), C: SIMD3<Float>(5,10,5), n: SIMD3<Float>(-1,0,0), materialIndex: Int32(0)), // material mirror
 		Triangle(A: SIMD3<Float>(5,10,5), B: SIMD3<Float>(5,0,-5), C: SIMD3<Float>(5,0,5), n: SIMD3<Float>(-1,0,0), materialIndex: Int32(0)),
-		// MUR GAUCHE (BLUE)
-		Triangle(A: SIMD3<Float>(-5,0,-5), B: SIMD3<Float>(-5,10,-5), C: SIMD3<Float>(-5,10,5), n: SIMD3<Float>(1,0,0), materialIndex: Int32(0)),
-		Triangle(A: SIMD3<Float>(-5,10,5), B: SIMD3<Float>(-5,0,-5), C: SIMD3<Float>(-5,0,5), n: SIMD3<Float>(1,0,0), materialIndex: Int32(0)),
+		// MUR GAUCHE (BLEU)
+		Triangle(A: SIMD3<Float>(-5,0,-5), B: SIMD3<Float>(-5,10,-5), C: SIMD3<Float>(-5,10,5), n: SIMD3<Float>(1,0,0), materialIndex: 0),
+		Triangle(A: SIMD3<Float>(-5,10,5), B: SIMD3<Float>(-5,0,-5), C: SIMD3<Float>(-5,0,5), n: SIMD3<Float>(1,0,0), materialIndex: 0),
 		// MUR DU FONC (BLANC)
 		Triangle(A: SIMD3<Float>(-5,0,-5), B: SIMD3<Float>(-5,10,-5), C: SIMD3<Float>(5,0,-5), n: SIMD3<Float>(0,0,1), materialIndex: Int32(0)),
 		Triangle(A: SIMD3<Float>(5,10,-5), B: SIMD3<Float>(-5,10,-5), C: SIMD3<Float>(5,0,-5), n: SIMD3<Float>(0,0,1), materialIndex: Int32(0)),
@@ -798,29 +906,36 @@ func loadTrianglesSalleMirroirs() -> [Triangle] {
 		Triangle(A: SIMD3<Float>(-5,0,5), B: SIMD3<Float>(-5,10,5), C: SIMD3<Float>(5,0,5), n: SIMD3<Float>(0,0,-1), materialIndex: Int32(0)),
 		Triangle(A: SIMD3<Float>(5,10,5), B: SIMD3<Float>(-5,10,5), C: SIMD3<Float>(5,0,5), n: SIMD3<Float>(0,0,-1), materialIndex: Int32(0)),
 		// SOL (GRIS)
-		Triangle(A: SIMD3<Float>(-5,0,-5), B: SIMD3<Float>(5,0,-5), C: SIMD3<Float>(5,0,5), n: SIMD3<Float>(0,1,0), materialIndex: 1), // material gray
-		Triangle(A: SIMD3<Float>(-5,0,-5), B: SIMD3<Float>(-5,0,5), C: SIMD3<Float>(5,0,5), n: SIMD3<Float>(0,1,0), materialIndex: 1),
+		Triangle(A: SIMD3<Float>(-5,0,-5), B: SIMD3<Float>(5,0,-5), C: SIMD3<Float>(5,0,5), n: SIMD3<Float>(0,1,0), materialIndex: Int32(1)), // material gray
+		Triangle(A: SIMD3<Float>(-5,0,-5), B: SIMD3<Float>(-5,0,5), C: SIMD3<Float>(5,0,5), n: SIMD3<Float>(0,1,0), materialIndex: Int32(1)),
 		// PLAFOND (GRIS)
-		Triangle(A: SIMD3<Float>(-5,10,-5), B: SIMD3<Float>(5,10,-5), C: SIMD3<Float>(5,10,5), n: SIMD3<Float>(0,-1,0), materialIndex: 1),
+		Triangle(A: SIMD3<Float>(-5,10,-5), B: SIMD3<Float>(5,10,-5), C: SIMD3<Float>(5,10,5), n: SIMD3<Float>(0,-1,0), materialIndex: Int32(1)),
 		Triangle(A: SIMD3<Float>(-5,10,-5), B: SIMD3<Float>(-5,10,5), C: SIMD3<Float>(5,10,5), n: SIMD3<Float>(0,-1,0), materialIndex: 1),
 		// LUMIÈRE
-		Triangle(A: SIMD3<Float>(-3,9.9,-3), B: SIMD3<Float>(3,9.9,-3), C: SIMD3<Float>(3,9.9,3), n: SIMD3<Float>(0,-1,0), materialIndex: 2), // material light
-		Triangle(A: SIMD3<Float>(-3,9.9,-3), B: SIMD3<Float>(-3,9.9,3), C: SIMD3<Float>(3,9.9,3), n: SIMD3<Float>(0,-1,0), materialIndex: 2),
+		Triangle(A: SIMD3<Float>(-3,9.9,-3), B: SIMD3<Float>(3,9.9,-3), C: SIMD3<Float>(3,9.9,3), n: SIMD3<Float>(0,-1,0), materialIndex: Int32(2)), // material light
+		Triangle(A: SIMD3<Float>(-3,9.9,-3), B: SIMD3<Float>(-3,9.9,3), C: SIMD3<Float>(3,9.9,3), n: SIMD3<Float>(0,-1,0), materialIndex: Int32(2)),
 	]
 }
 
 func loadSpheresSalleMirroirs() -> [Sphere] {
 	return [
 //		Sphere(center: [0, 5, -3], radius: 1.0, material: .tintedGlass(color: .red)),
-		Sphere(center: [2, 6, -4], radius: 0.8, materialIndex: 3), // material green
-		Sphere(center: [-2, 6, -4], radius: 1.0, materialIndex: 4), // material red
-		Sphere(center: [0, 3, -4], radius: 0.8, materialIndex: 5) // material whiteGlass
+		Sphere(center: [2, 6, -4], radius: 0.8, materialIndex: Int32(3)), // material green
+		Sphere(center: [-2, 6, -4], radius: 1.0, materialIndex: Int32(4)), // material red
+		Sphere(center: [0, 3, -4], radius: 0.8, materialIndex: Int32(5)) // material mirror
 		
 	]
 }
 
 func loadSalleMirroirs() -> SceneInfo {
-	let materials = [Material.coloredMirror(color: SIMD3(0.98, 0.98, 0.98)), .gray, .light, .green, .red, .whiteGlass]
+	let materials: [Material] = [
+		.mirror, // 0
+		.black, // 1
+		.light, // 2
+		.green, // 3
+		.coloredMirror(color: .red), // 4
+		.mirror // 5
+	]
 	let triangles = loadTrianglesSalleMirroirs()
 	let spheres = loadSpheresSalleMirroirs()
 	var meshes: [MeshInfo] = []

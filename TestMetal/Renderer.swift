@@ -26,14 +26,15 @@ struct StatsNodes {
 	var nbLeafs: Int = 0
 	var maxDepth: Int = 0
 	var maxTriangles: Int = 0
+	var cost: Float = 0
 }
 
 
 func makeDefaultScene() -> SceneInfo {
-	var scene = loadMesh(named: "SalleCheval")
-//	var scene = loadSalleMirroirs()
-//	var scene = loadMesh(named: "SalleCheval")
-//	var scene = loadSalleBoules()
+//		var scene = loadMesh(named: "dragon_80k")
+		var scene = loadSalleMirroirs()
+//		var scene = loadMesh(named: "Salle2_2")
+//		var scene = loadSalleBoules()
 	
 	var nodes: [Node] = []
 	var bound = Bounds.empty
@@ -42,7 +43,6 @@ func makeDefaultScene() -> SceneInfo {
 		bound.growToInclude(t.B)
 		bound.growToInclude(t.C)
 	}
-	print(scene.meshes)
 	
 	nodes = []
 	
@@ -60,7 +60,7 @@ func makeDefaultScene() -> SceneInfo {
 			bounds: Bounds(boundMin: mesh.boundMin, boundMax: mesh.boundMax)
 		)
 		nodes.append(root)
-
+		
 		split(
 			parentIndex: nodes.count - 1,
 			parent: &root,
@@ -71,25 +71,19 @@ func makeDefaultScene() -> SceneInfo {
 			stats: &stats
 		)
 	}
-	print("ici")
-	for mesh in scene.meshes {
-		let node = nodes[Int(mesh.firstNodeIndex)]
-		print(node)
-	}
 	
-	print(scene.meshes)
-	
-//	var root = Node(childIndex: 0, triangleIndex: 0, nbTriangles: Int32(scene.triangles.count), depth: 0, bounds: bound)
-//	nodes.append(root)
-//	
-//	split(parentIndex: 0, parent: &root, triangles: &scene.triangles, nodes: &nodes, depth: 0, maxDepth: 32, stats: &stats)
+	//	var root = Node(childIndex: 0, triangleIndex: 0, nbTriangles: Int32(scene.triangles.count), depth: 0, bounds: bound)
+	//	nodes.append(root)
+	//
+	//	split(parentIndex: 0, parent: &root, triangles: &scene.triangles, nodes: &nodes, depth: 0, maxDepth: 32, stats: &stats)
 	let ftime = Date().timeIntervalSince1970
 	let time = ftime - dtime
-
+	
 	scene.nodes = nodes
 	
 	print("Stats nodes")
 	print("Time (s) = \(time)")
+	print("Cost: \(stats.cost)")
 	print("Triangles : \(scene.triangles.count)")
 	print("Node count : \(scene.nodes?.count ?? 0)")
 	print("Leaf count : \(stats.nbLeafs)")
@@ -97,7 +91,7 @@ func makeDefaultScene() -> SceneInfo {
 	print("Max triangles : \(stats.maxTriangles)")
 	print("Mean triangles : \(Float(scene.triangles.count) / Float(stats.nbLeafs))")
 	
-
+	
 	return scene
 }
 
@@ -127,7 +121,7 @@ class Renderer: NSObject, MTKViewDelegate, ObservableObject {
 	private let nodesBuffer: MTLBuffer
 	private var accumulationTexture: MTLTexture!
 	private var lastTimestamp: CFTimeInterval = CACurrentMediaTime()
-	private var frameCount: Int = 0
+	private var frameCount: UInt32 = 0
 	private var frameCounter: Int = 0
 	@Published var fps: CGFloat = 60.0
 	@Published var GPUTime: CGFloat = 1.0
@@ -184,6 +178,7 @@ class Renderer: NSObject, MTKViewDelegate, ObservableObject {
 		didSet {
 			yaw = cameraRotation.y
 			yaz = cameraRotation.x
+			needViewport = true
 		}
 	}
 	var camera = Camera3D(position: SIMD3<Float>(0, 4, 14), fovy: 80)
@@ -216,11 +211,26 @@ class Renderer: NSObject, MTKViewDelegate, ObservableObject {
 	@Published var benchmarking = false
 	private var offscreenTexture: MTLTexture?
 	@Published var framesPerTick: Int = 5
-
+	
+	// GROSSE MODIFICATION :
+	// On met en cache tout ce qui ne change pas pour éviter des conversions/recalculs à chaque frame.
+	private let nbMaterialsU32: UInt32
+	private let nbSpheresU32: UInt32
+	private let nbTrianglesU32: UInt32
+	private let nbMeshesU32: UInt32
+	private let nbNodesU32: UInt32
+	private let sceneBarycentre: SIMD3<Float>
+	
+	// GROSSE MODIFICATION :
+	// Buffer CPU réutilisé pour remettre la texture d'accumulation à zéro.
+	// Cela évite de réallouer un gros tableau à chaque clear.
+	private var accumulationZeroPixels: [SIMD4<Float>] = []
+	private var accumulationZeroCapacity: Int = 0
+	
 	
 	// MARK: init
 	init(metalView: MTKView) {
-//		print(meshes)
+		//		print(meshes)
 		
 		self.device = metalView.device!
 		self.commandQueue = device.makeCommandQueue()!
@@ -277,9 +287,6 @@ class Renderer: NSObject, MTKViewDelegate, ObservableObject {
 			options: [.storageModeShared]
 		)!
 		
-		let meshesData = meshesBuffer.contents()
-		let meshesPtr = meshesData.bindMemory(to: MeshInfo.self, capacity: meshes.count)
-		
 		self.cameraPosition = camera.position
 		self.cameraRotation = .zero // Initialize cameraRotation
 		
@@ -287,6 +294,13 @@ class Renderer: NSObject, MTKViewDelegate, ObservableObject {
 		
 		self.stats = StatsGPU()
 		statsBuffer = device.makeBuffer(length: MemoryLayout<StatsGPU>.stride, options: .storageModeShared)
+		
+		self.nbMaterialsU32 = UInt32(materials.count)
+		self.nbSpheresU32 = UInt32(spheres.count)
+		self.nbTrianglesU32 = UInt32(triangles.count)
+		self.nbMeshesU32 = UInt32(meshes.count)
+		self.nbNodesU32 = UInt32(nodes.count)
+		self.sceneBarycentre = getBarycentre(scene: scene, mesh: 0)
 		
 		super.init()
 	}
@@ -337,7 +351,7 @@ class Renderer: NSObject, MTKViewDelegate, ObservableObject {
 		desc.usage = [.shaderRead, .shaderWrite, .renderTarget]
 		offscreenTexture = device.makeTexture(descriptor: desc)
 	}
-
+	
 	
 	
 	private func createAccumulationTexture(size: CGSize) {
@@ -350,6 +364,14 @@ class Renderer: NSObject, MTKViewDelegate, ObservableObject {
 		let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba32Float, width: width, height: height, mipmapped: false)
 		descriptor.usage = [.shaderRead, .shaderWrite]
 		accumulationTexture = device.makeTexture(descriptor: descriptor)
+		
+		// GROSSE MODIFICATION :
+		// On prépare un buffer réutilisable pour le clear CPU.
+		let pixelCount = width * height
+		if pixelCount > accumulationZeroCapacity {
+			accumulationZeroPixels = [SIMD4<Float>](repeating: SIMD4<Float>(0, 0, 0, 0), count: pixelCount)
+			accumulationZeroCapacity = pixelCount
+		}
 	}
 	
 	private func clearAccumulationTexture() {
@@ -358,12 +380,49 @@ class Renderer: NSObject, MTKViewDelegate, ObservableObject {
 		let width = texture.width
 		let height = texture.height
 		
-		let zeroColor = SIMD4<Float>(0, 0, 0, 0)
 		let region = MTLRegionMake2D(0, 0, width, height)
+		let pixelCount = width * height
 		
-		var zeros = [SIMD4<Float>](repeating: zeroColor, count: width * height)
+		if pixelCount > accumulationZeroCapacity {
+			accumulationZeroPixels = [SIMD4<Float>](repeating: SIMD4<Float>(0, 0, 0, 0), count: pixelCount)
+			accumulationZeroCapacity = pixelCount
+		}
 		
-		texture.replace(region: region, mipmapLevel: 0, withBytes: &zeros, bytesPerRow: MemoryLayout<SIMD4<Float>>.stride * width)
+		accumulationZeroPixels.withUnsafeMutableBytes { rawPtr in
+			guard let base = rawPtr.baseAddress else { return }
+			texture.replace(
+				region: region,
+				mipmapLevel: 0,
+				withBytes: base,
+				bytesPerRow: MemoryLayout<SIMD4<Float>>.stride * width
+			)
+		}
+	}
+	
+	private func ensureAccumulationTexture(for size: CGSize) {
+		let width = Int(size.width)
+		let height = Int(size.height)
+		guard width > 0, height > 0 else { return }
+		
+		if accumulationTexture == nil ||
+			width != accumulationTexture.width ||
+			height != accumulationTexture.height {
+			createAccumulationTexture(size: size)
+			frameCount = 0
+			needViewport = true
+		}
+	}
+	
+	private func ensureOffscreenTexture(for size: CGSize) {
+		let width = Int(size.width)
+		let height = Int(size.height)
+		guard width > 0, height > 0 else { return }
+		
+		if offscreenTexture == nil ||
+			offscreenTexture!.width != width ||
+			offscreenTexture!.height != height {
+			createOffscreenTexture(size: size)
+		}
 	}
 	
 	func startOfflineRender() {
@@ -386,14 +445,20 @@ class Renderer: NSObject, MTKViewDelegate, ObservableObject {
 	
 	// MARK: Camera
 	func updateCamera() {
-		if keyZ { camera.position += forward * cameraSpeed ; needViewport = true }
-		if keyS { camera.position -= forward * cameraSpeed ; needViewport = true }
-		if keyQ { camera.position -= right * cameraSpeed ; needViewport = true }
-		if keyD { camera.position += right * cameraSpeed ; needViewport = true }
-		if keyL { yaw -= cameraSpeed * 0.5 ; needViewport = true }
-		if keyR { yaw += cameraSpeed * 0.5 ; needViewport = true}
-		if keyUp { yaz += cameraSpeed * 0.5 ; needViewport = true}
-		if keyDown { yaz -= cameraSpeed * 0.5 ; needViewport = true}
+		var moved = false
+		
+		if keyZ { camera.position += forward * cameraSpeed ; moved = true }
+		if keyS { camera.position -= forward * cameraSpeed ; moved = true }
+		if keyQ { camera.position -= right * cameraSpeed ; moved = true }
+		if keyD { camera.position += right * cameraSpeed ; moved = true }
+		if keyL { yaw -= cameraSpeed * 0.5 ; moved = true }
+		if keyR { yaw += cameraSpeed * 0.5 ; moved = true }
+		if keyUp { yaz += cameraSpeed * 0.5 ; moved = true }
+		if keyDown { yaz -= cameraSpeed * 0.5 ; moved = true }
+		
+		if moved {
+			needViewport = true
+		}
 		
 		// Keep cameraRotation in sync with yaw and yaz
 		cameraRotation.x = yaz
@@ -460,30 +525,203 @@ class Renderer: NSObject, MTKViewDelegate, ObservableObject {
 	}
 	
 	func writeRecordStats() {
-        let lines = recordStats.compactMap { entry -> String? in
-            guard let (rotation, fps) = entry else { return nil }
-            let rotStr = String(format: "%.4f", rotation * 180.0 / Float.pi)
+		let lines = recordStats.compactMap { entry -> String? in
+			guard let (rotation, fps) = entry else { return nil }
+			let rotStr = String(format: "%.4f", rotation * 180.0 / Float.pi)
 			let gpuStr = String(format: "%.1f", fps)
 			return "\(rotStr), \(gpuStr)"
-        }
-        let content = lines.joined(separator: "\n")
-
-        DispatchQueue.main.async {
-            let panel = NSSavePanel()
-            panel.title = "Enregistrer les statistiques de rendu"
-            panel.allowedContentTypes = [.plainText]
-            panel.nameFieldStringValue = "stats.txt"
-            panel.begin { response in
-                if response == .OK, let url = panel.url {
-                    do {
-                        try content.write(to: url, atomically: true, encoding: .utf8)
-                        print("Stats saved at \(url.path)")
-                    } catch {
-                        print("Error writing stats: \(error)")
-                    }
-                }
-            }
-        }
+		}
+		let content = lines.joined(separator: "\n")
+		
+		DispatchQueue.main.async {
+			let panel = NSSavePanel()
+			panel.title = "Enregistrer les statistiques de rendu"
+			panel.allowedContentTypes = [.plainText]
+			panel.nameFieldStringValue = "stats.txt"
+			panel.begin { response in
+				if response == .OK, let url = panel.url {
+					do {
+						try content.write(to: url, atomically: true, encoding: .utf8)
+						print("Stats saved at \(url.path)")
+					} catch {
+						print("Error writing stats: \(error)")
+					}
+				}
+			}
+		}
+	}
+	
+	// GROSSE MODIFICATION :
+	// On centralise la rotation auto/stat pour éviter le code dupliqué
+	// entre benchmark et mode normal.
+	private func updateAutomaticCameraRotation(step: Float) {
+		camera.position = rotatePoint(
+			camera.position,
+			around: sceneBarycentre,
+			byX: 0.0,
+			byY: step,
+			byZ: 0.0
+		)
+		
+		let direction = simd_normalize(sceneBarycentre - camera.position)
+		yaw = atan2(direction.x, -direction.z)
+		yaz = asin(direction.y / simd_length(direction))
+		cameraRotation = SIMD3<Float>(yaz, yaw, 0)
+		
+		currentCameraRotation += step
+		if currentCameraRotation >= 6.28 {
+			makeStat = false
+			currentCameraRotation = 0.0
+			writeRecordStats()
+		}
+		
+		needViewport = true
+	}
+	
+	// GROSSE MODIFICATION :
+	// On centralise tous les bindings communs pour éviter les gros blocs répétitifs.
+	private func setCommonFragmentState(
+		encoder: MTLRenderCommandEncoder,
+		resolution: inout SIMD2<Float>,
+		cameraPosition: inout SIMD3<Float>,
+		frameCount: inout UInt32,
+		isAccumulating: inout Bool,
+		isRayTracing: inout Bool,
+		topLeft: inout SIMD3<Float>,
+		vx: inout SIMD3<Float>,
+		vy: inout SIMD3<Float>,
+		tileOrigin: inout SIMD2<UInt32>,
+		tileSizeVec: inout SIMD2<UInt32>,
+		maxBounce: inout Int,
+		maxBouncePreviews: inout Int,
+		raysPerPixel: inout Int,
+		isBetterRayTracing: inout Bool,
+		accumulationTexture: MTLTexture?
+	) {
+		encoder.setFragmentBytes(&resolution, length: MemoryLayout<SIMD2<Float>>.stride, index: 0)
+		encoder.setFragmentBytes(&cameraPosition, length: MemoryLayout<SIMD3<Float>>.stride, index: 1)
+		encoder.setFragmentBuffer(materialsBuffer, offset: 0, index: 23)
+		encoder.setFragmentBytes(UnsafeMutableRawPointer(mutating: [nbMaterialsU32]), length: MemoryLayout<UInt32>.stride, index: 24)
+		encoder.setFragmentBuffer(spheresBuffer, offset: 0, index: 2)
+		encoder.setFragmentBytes(UnsafeMutableRawPointer(mutating: [nbSpheresU32]), length: MemoryLayout<UInt32>.stride, index: 3)
+		encoder.setFragmentBuffer(trianglesBuffer, offset: 0, index: 4)
+		encoder.setFragmentBytes(UnsafeMutableRawPointer(mutating: [nbTrianglesU32]), length: MemoryLayout<UInt32>.stride, index: 5)
+		encoder.setFragmentBuffer(meshesBuffer, offset: 0, index: 6)
+		encoder.setFragmentBytes(UnsafeMutableRawPointer(mutating: [nbMeshesU32]), length: MemoryLayout<UInt32>.stride, index: 7)
+		encoder.setFragmentBuffer(nodesBuffer, offset: 0, index: 8)
+		encoder.setFragmentBytes(UnsafeMutableRawPointer(mutating: [nbNodesU32]), length: MemoryLayout<UInt32>.stride, index: 9)
+		encoder.setFragmentBytes(&frameCount, length: MemoryLayout<UInt32>.stride, index: 10)
+		encoder.setFragmentBytes(&isAccumulating, length: MemoryLayout<Bool>.stride, index: 11)
+		encoder.setFragmentBytes(&isRayTracing, length: MemoryLayout<Bool>.stride, index: 12)
+		encoder.setFragmentBytes(&topLeft, length: MemoryLayout<SIMD3<Float>>.stride, index: 13)
+		encoder.setFragmentBytes(&vx, length: MemoryLayout<SIMD3<Float>>.stride, index: 14)
+		encoder.setFragmentBytes(&vy, length: MemoryLayout<SIMD3<Float>>.stride, index: 15)
+		encoder.setFragmentTexture(accumulationTexture, index: 0)
+		encoder.setFragmentBytes(&tileOrigin, length: MemoryLayout<SIMD2<UInt32>>.stride, index: 16)
+		encoder.setFragmentBytes(&tileSizeVec, length: MemoryLayout<SIMD2<UInt32>>.stride, index: 17)
+		encoder.setFragmentBytes(&maxBounce, length: MemoryLayout<Int>.stride, index: 18)
+		encoder.setFragmentBytes(&maxBouncePreviews, length: MemoryLayout<Int>.stride, index: 19)
+		encoder.setFragmentBytes(&raysPerPixel, length: MemoryLayout<Int>.stride, index: 20)
+		encoder.setFragmentBytes(&isBetterRayTracing, length: MemoryLayout<Bool>.stride, index: 21)
+		encoder.setFragmentBuffer(statsBuffer, offset: 0, index: 22)
+	}
+	
+	// Version plus sûre pour les valeurs constantes UInt32
+	private func setUInt32(_ value: UInt32, encoder: MTLRenderCommandEncoder, index: Int) {
+		var v = value
+		encoder.setFragmentBytes(&v, length: MemoryLayout<UInt32>.stride, index: index)
+	}
+	
+	private func setCommonFragmentStateSafe(
+		encoder: MTLRenderCommandEncoder,
+		resolution: inout SIMD2<Float>,
+		cameraPosition: inout SIMD3<Float>,
+		frameCount: inout UInt32,
+		isAccumulating: inout Bool,
+		isRayTracing: inout Bool,
+		topLeft: inout SIMD3<Float>,
+		vx: inout SIMD3<Float>,
+		vy: inout SIMD3<Float>,
+		tileOrigin: inout SIMD2<UInt32>,
+		tileSizeVec: inout SIMD2<UInt32>,
+		maxBounce: inout Int,
+		maxBouncePreviews: inout Int,
+		raysPerPixel: inout Int,
+		isBetterRayTracing: inout Bool,
+		accumulationTexture: MTLTexture?
+	) {
+		encoder.setFragmentBytes(&resolution, length: MemoryLayout<SIMD2<Float>>.stride, index: 0)
+		encoder.setFragmentBytes(&cameraPosition, length: MemoryLayout<SIMD3<Float>>.stride, index: 1)
+		encoder.setFragmentBuffer(materialsBuffer, offset: 0, index: 23)
+		setUInt32(nbMaterialsU32, encoder: encoder, index: 24)
+		encoder.setFragmentBuffer(spheresBuffer, offset: 0, index: 2)
+		setUInt32(nbSpheresU32, encoder: encoder, index: 3)
+		encoder.setFragmentBuffer(trianglesBuffer, offset: 0, index: 4)
+		setUInt32(nbTrianglesU32, encoder: encoder, index: 5)
+		encoder.setFragmentBuffer(meshesBuffer, offset: 0, index: 6)
+		setUInt32(nbMeshesU32, encoder: encoder, index: 7)
+		encoder.setFragmentBuffer(nodesBuffer, offset: 0, index: 8)
+		setUInt32(nbNodesU32, encoder: encoder, index: 9)
+		encoder.setFragmentBytes(&frameCount, length: MemoryLayout<UInt32>.stride, index: 10)
+		encoder.setFragmentBytes(&isAccumulating, length: MemoryLayout<Bool>.stride, index: 11)
+		encoder.setFragmentBytes(&isRayTracing, length: MemoryLayout<Bool>.stride, index: 12)
+		encoder.setFragmentBytes(&topLeft, length: MemoryLayout<SIMD3<Float>>.stride, index: 13)
+		encoder.setFragmentBytes(&vx, length: MemoryLayout<SIMD3<Float>>.stride, index: 14)
+		encoder.setFragmentBytes(&vy, length: MemoryLayout<SIMD3<Float>>.stride, index: 15)
+		encoder.setFragmentTexture(accumulationTexture, index: 0)
+		encoder.setFragmentBytes(&tileOrigin, length: MemoryLayout<SIMD2<UInt32>>.stride, index: 16)
+		encoder.setFragmentBytes(&tileSizeVec, length: MemoryLayout<SIMD2<UInt32>>.stride, index: 17)
+		encoder.setFragmentBytes(&maxBounce, length: MemoryLayout<Int>.stride, index: 18)
+		encoder.setFragmentBytes(&maxBouncePreviews, length: MemoryLayout<Int>.stride, index: 19)
+		encoder.setFragmentBytes(&raysPerPixel, length: MemoryLayout<Int>.stride, index: 20)
+		encoder.setFragmentBytes(&isBetterRayTracing, length: MemoryLayout<Bool>.stride, index: 21)
+		encoder.setFragmentBuffer(statsBuffer, offset: 0, index: 22)
+	}
+	
+	// GROSSE MODIFICATION :
+	// Gestion unifiée du timing GPU et de l'enregistrement des stats.
+	private func handleCompletedCommandBuffer(_ cmd: MTLCommandBuffer, appendStats: Bool) {
+		let start = cmd.gpuStartTime
+		let end = cmd.gpuEndTime
+		guard start > 0, end > 0 else { return }
+		
+		let workMs = (end - start) * 1000.0
+		var cadenceMs = workMs
+		if let prevEnd = self.lastGPUEndTime {
+			cadenceMs = (end - prevEnd) * 1000.0
+		}
+		self.lastGPUEndTime = end
+		
+		let instFPS = 1000.0 / max(cadenceMs, 0.001)
+		self.emaFPS = self.emaFPS == 0 ? instFPS : (self.alpha * instFPS + (1 - self.alpha) * self.emaFPS)
+		
+		if appendStats && self.makeStat {
+			let angle = self.currentCameraRotation
+			let sample: (Float, CGFloat) = (angle, CGFloat(self.emaFPS))
+			DispatchQueue.main.async {
+				self.recordStats.append(sample)
+			}
+		}
+		
+		DispatchQueue.main.async {
+			self.gpuMsPerFrame = cadenceMs
+			self.GPUTime = workMs
+			self.fps = self.emaFPS
+		}
+	}
+	
+	private func updateViewportIfNeeded(resolution: SIMD2<Float>) {
+		if needViewport {
+			initViewport(camera: camera, resolution: resolution, yaw: yaw, topLeft: &topLeft, vx: &vx, vy: &vy)
+			needViewport = false
+		}
+	}
+	
+	private func handleInputToggles(view: MTKView) {
+		if keyA { toggleAccumulation(); keyA = false }
+		if keyC { takeScreenshot(view: view); keyC = false }
+		if keyr { startOfflineRender(); keyr = false }
+		if isAccumulating { frameCount += 1 }
 	}
 	
 	// MARK: Draw
@@ -494,37 +732,21 @@ class Renderer: NSObject, MTKViewDelegate, ObservableObject {
 		// ─────────────────────────────────────────────────────────────
 		if benchmarking {
 			// 1) textures / stats
-			if offscreenTexture == nil ||
-				offscreenTexture!.width  != Int(view.drawableSize.width) ||
-				offscreenTexture!.height != Int(view.drawableSize.height) {
-				createOffscreenTexture(size: view.drawableSize)
-			}
+			ensureOffscreenTexture(for: view.drawableSize)
 			guard let tex = offscreenTexture else { return }
 			
 			// réinitialise les compteurs GPU (si utilisés dans les shaders)
-//			statsBuffer.contents().initializeMemory(as: StatsGPU.self, repeating: StatsGPU(), count: 1)
+			//			statsBuffer.contents().initializeMemory(as: StatsGPU.self, repeating: StatsGPU(), count: 1)
 			
 			// 2) caméra + viewport
 			updateCamera()
 			var resolution = SIMD2<Float>(Float(tex.width), Float(tex.height))
-			initViewport(camera: camera, resolution: resolution, yaw: yaw, topLeft: &topLeft, vx: &vx, vy: &vy)
 			
-			// 3) éventuellement rotation auto pour le logging CSV
 			if makeStat {
-				camera.position = rotatePoint(camera.position, around: getBarycentre(scene: scene, mesh: 0), byX: 0.0, byY: 0.01, byZ: 0.0)
-				let target = getBarycentre(scene: scene, mesh: 0)
-				let direction = simd_normalize(target - camera.position)
-				yaw = atan2(direction.x, -direction.z)
-				yaz = asin(direction.y / simd_length(direction))
-				cameraRotation = SIMD3<Float>(yaz, yaw, 0)
-				
-				currentCameraRotation += 0.01
-				if currentCameraRotation >= 6.28 {
-					makeStat = false
-					currentCameraRotation = 0.0
-					writeRecordStats()
-				}
+				updateAutomaticCameraRotation(step: 0.01)
 			}
+			
+			updateViewportIfNeeded(resolution: resolution)
 			
 			// 4) pousser plusieurs CB offscreen (pas de present)
 			for _ in 0..<framesPerTick {
@@ -544,43 +766,34 @@ class Renderer: NSObject, MTKViewDelegate, ObservableObject {
 				enc.setVertexBytes(&resolution, length: MemoryLayout<SIMD2<Float>>.stride, index: 0)
 				
 				// Fragments
-				enc.setFragmentBytes(&resolution, length: MemoryLayout<SIMD2<Float>>.stride, index: 0)
-				enc.setFragmentBytes(&cameraPosition, length: MemoryLayout<SIMD3<Float>>.stride, index: 1)
-				enc.setFragmentBuffer(materialsBuffer, offset: 0, index: 23)
-				var nbMaterialsU32: UInt32 = UInt32(materials.count)
-				enc.setFragmentBytes(&nbMaterialsU32, length: MemoryLayout<UInt32>.stride, index: 24)
-				enc.setFragmentBuffer(spheresBuffer, offset: 0, index: 2)
-				var nbSpheresU32: UInt32 = UInt32(spheres.count)
-				enc.setFragmentBytes(&nbSpheresU32, length: MemoryLayout<UInt32>.stride, index: 3)
-				enc.setFragmentBuffer(trianglesBuffer, offset: 0, index: 4)
-				var nbTrianglesU32: UInt32 = UInt32(triangles.count)
-				enc.setFragmentBytes(&nbTrianglesU32, length: MemoryLayout<UInt32>.stride, index: 5)
-				enc.setFragmentBuffer(meshesBuffer, offset: 0, index: 6)
-				var nbMeshesU32: UInt32 = UInt32(meshes.count)
-				enc.setFragmentBytes(&nbMeshesU32, length: MemoryLayout<UInt32>.stride, index: 7)
-				enc.setFragmentBuffer(nodesBuffer, offset: 0, index: 8)
-				var nbNodesU32: UInt32 = UInt32(nodes.count)
-				enc.setFragmentBytes(&nbNodesU32, length: MemoryLayout<UInt32>.stride, index: 9)
-				enc.setFragmentBytes(&frameCount, length: MemoryLayout<UInt32>.stride, index: 10)
+				var camPos = cameraPosition
 				var accFalse = false
-				enc.setFragmentBytes(&accFalse, length: MemoryLayout<Bool>.stride, index: 11) // pas d'accumulation en bench
-				enc.setFragmentBytes(&isRayTracing, length: MemoryLayout<Bool>.stride, index: 12)
-				enc.setFragmentBytes(&topLeft, length: MemoryLayout<SIMD3<Float>>.stride, index: 13)
-				enc.setFragmentBytes(&vx, length: MemoryLayout<SIMD3<Float>>.stride, index: 14)
-				enc.setFragmentBytes(&vy, length: MemoryLayout<SIMD3<Float>>.stride, index: 15)
-				
-				enc.setFragmentTexture(tex, index: 0)
-				
+				var isRT = isRayTracing
+				var betterRT = isBetterRayTracing
+				var maxB = maxBounce
+				var maxBP = maxBouncePreviews
+				var rpp = raysPerPixel
 				var tileOrigin = SIMD2<UInt32>(0, 0)
 				var tileSizeVec = SIMD2<UInt32>(UInt32(resolution.x), UInt32(resolution.y))
-				enc.setFragmentBytes(&tileOrigin, length: MemoryLayout<SIMD2<UInt32>>.stride, index: 16)
-				enc.setFragmentBytes(&tileSizeVec, length: MemoryLayout<SIMD2<UInt32>>.stride, index: 17)
 				
-				enc.setFragmentBytes(&maxBounce, length: MemoryLayout<Int>.stride, index: 18)
-				enc.setFragmentBytes(&maxBouncePreviews, length: MemoryLayout<Int>.stride, index: 19)
-				enc.setFragmentBytes(&raysPerPixel, length: MemoryLayout<Int>.stride, index: 20)
-				enc.setFragmentBytes(&isBetterRayTracing, length: MemoryLayout<Bool>.stride, index: 21)
-				enc.setFragmentBuffer(statsBuffer, offset: 0, index: 22)
+				setCommonFragmentStateSafe(
+					encoder: enc,
+					resolution: &resolution,
+					cameraPosition: &camPos,
+					frameCount: &frameCount,
+					isAccumulating: &accFalse,
+					isRayTracing: &isRT,
+					topLeft: &topLeft,
+					vx: &vx,
+					vy: &vy,
+					tileOrigin: &tileOrigin,
+					tileSizeVec: &tileSizeVec,
+					maxBounce: &maxB,
+					maxBouncePreviews: &maxBP,
+					raysPerPixel: &rpp,
+					isBetterRayTracing: &betterRT,
+					accumulationTexture: tex
+				)
 				
 				enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
 				enc.endEncoding()
@@ -588,33 +801,9 @@ class Renderer: NSObject, MTKViewDelegate, ObservableObject {
 				// Timing + enregistrement stats (cadence > 60 possible)
 				cb.addCompletedHandler { [weak self] cmd in
 					guard let self = self else { return }
-					let s = cmd.gpuStartTime, e = cmd.gpuEndTime
-					guard s > 0, e > 0 else { return }
+					self.handleCompletedCommandBuffer(cmd, appendStats: true)
 					
-					var cadenceMs = (e - s) * 1000.0
-					if let prev = self.lastGPUEndTime {
-						cadenceMs = (e - prev) * 1000.0
-					}
-					self.lastGPUEndTime = e
-					
-					let instFPS = 1000.0 / max(cadenceMs, 0.001)
-					self.emaFPS = self.emaFPS == 0 ? instFPS : (self.alpha * instFPS + (1 - self.alpha) * self.emaFPS)
-					
-					// log CSV si demandé (au bon moment : fin GPU)
-					if self.makeStat {
-						let angle = self.currentCameraRotation         // rad si tu préfères
-						let sample: (Float, CGFloat) = (angle, CGFloat(self.emaFPS))
-						DispatchQueue.main.async {
-							self.recordStats.append(sample)
-						}
-					}
-					
-					stats.onScreenTriangles = UInt32(10)
-					
-					DispatchQueue.main.async {
-						self.gpuMsPerFrame = cadenceMs
-						self.fps = self.emaFPS
-					}
+					self.stats.onScreenTriangles = UInt32(10)
 				}
 				
 				cb.commit()
@@ -632,39 +821,20 @@ class Renderer: NSObject, MTKViewDelegate, ObservableObject {
 		let width  = Int(view.drawableSize.width)
 		let height = Int(view.drawableSize.height)
 		
-		if accumulationTexture == nil ||
-			width  != accumulationTexture.width ||
-			height != accumulationTexture.height {
-			createAccumulationTexture(size: view.drawableSize)
-			frameCount = 0
-		}
+		ensureAccumulationTexture(for: view.drawableSize)
 		
 		// reset des stats GPU (comme tu faisais)
-//		statsBuffer.contents().initializeMemory(as: StatsGPU.self, repeating: StatsGPU(), count: 1)
+		//		statsBuffer.contents().initializeMemory(as: StatsGPU.self, repeating: StatsGPU(), count: 1)
 		
 		// Caméra + éventuelle rotation auto pour CSV
 		updateCamera()
 		var resolution = SIMD2<Float>(Float(width), Float(height))
 		
 		if makeStat {
-			camera.position = rotatePoint(camera.position, around: getBarycentre(scene: scene, mesh: 0),
-										  byX: 0.0, byY: 0.01, byZ: 0.0)
-			
-			let target = getBarycentre(scene: scene, mesh: 0)
-			let direction = simd_normalize(target - camera.position)
-			yaw = atan2(direction.x, -direction.z)
-			yaz = asin(direction.y / simd_length(direction))
-			cameraRotation = SIMD3<Float>(yaz, yaw, 0)
-			
-			currentCameraRotation += 0.01
-			if currentCameraRotation >= 6.28 {
-				makeStat = false
-				currentCameraRotation = 0.0
-				writeRecordStats()
-			}
+			updateAutomaticCameraRotation(step: 0.002)
 		}
 		
-		initViewport(camera: camera, resolution: resolution, yaw: yaw, topLeft: &topLeft, vx: &vx, vy: &vy)
+		updateViewportIfNeeded(resolution: resolution)
 		
 		guard let drawable = view.currentDrawable,
 			  let descriptor = view.currentRenderPassDescriptor else { return }
@@ -698,37 +868,32 @@ class Renderer: NSObject, MTKViewDelegate, ObservableObject {
 		renderEncoder.setVertexBytes(&resolution, length: MemoryLayout<SIMD2<Float>>.stride, index: 0)
 		
 		// Fragments
-		renderEncoder.setFragmentBytes(&resolution, length: MemoryLayout<SIMD2<Float>>.stride, index: 0)
-		renderEncoder.setFragmentBytes(&cameraPosition, length: MemoryLayout<SIMD3<Float>>.stride, index: 1)
-		renderEncoder.setFragmentBuffer(materialsBuffer, offset: 0, index: 23)
-		var nbMaterialsU32: UInt32 = UInt32(materials.count)
-		renderEncoder.setFragmentBytes(&nbMaterialsU32, length: MemoryLayout<UInt32>.stride, index: 24)
-		renderEncoder.setFragmentBuffer(spheresBuffer, offset: 0, index: 2)
-		var nbSpheresU32: UInt32 = UInt32(spheres.count)
-		renderEncoder.setFragmentBytes(&nbSpheresU32, length: MemoryLayout<UInt32>.stride, index: 3)
-		renderEncoder.setFragmentBuffer(trianglesBuffer, offset: 0, index: 4)
-		var nbTrianglesU32: UInt32 = UInt32(triangles.count)
-		renderEncoder.setFragmentBytes(&nbTrianglesU32, length: MemoryLayout<UInt32>.stride, index: 5)
-		renderEncoder.setFragmentBuffer(meshesBuffer, offset: 0, index: 6)
-		var nbMeshesU32: UInt32 = UInt32(meshes.count)
-		renderEncoder.setFragmentBytes(&nbMeshesU32, length: MemoryLayout<UInt32>.stride, index: 7)
-		renderEncoder.setFragmentBuffer(nodesBuffer, offset: 0, index: 8)
-		var nbNodesU32: UInt32 = UInt32(nodes.count)
-		renderEncoder.setFragmentBytes(&nbNodesU32, length: MemoryLayout<UInt32>.stride, index: 9)
-		renderEncoder.setFragmentBytes(&frameCount, length: MemoryLayout<UInt32>.stride, index: 10)
-		renderEncoder.setFragmentBytes(&isAccumulating, length: MemoryLayout<Bool>.stride, index: 11)
-		renderEncoder.setFragmentBytes(&isRayTracing, length: MemoryLayout<Bool>.stride, index: 12)
-		renderEncoder.setFragmentBytes(&topLeft, length: MemoryLayout<SIMD3<Float>>.stride, index: 13)
-		renderEncoder.setFragmentBytes(&vx, length: MemoryLayout<SIMD3<Float>>.stride, index: 14)
-		renderEncoder.setFragmentBytes(&vy, length: MemoryLayout<SIMD3<Float>>.stride, index: 15)
-		renderEncoder.setFragmentTexture(accumulationTexture, index: 0)
-		renderEncoder.setFragmentBytes(&tileOrigin, length: MemoryLayout<SIMD2<UInt32>>.stride, index: 16)
-		renderEncoder.setFragmentBytes(&tileSizeVec, length: MemoryLayout<SIMD2<UInt32>>.stride, index: 17)
-		renderEncoder.setFragmentBytes(&maxBounce, length: MemoryLayout<Int>.stride, index: 18)
-		renderEncoder.setFragmentBytes(&maxBouncePreviews, length: MemoryLayout<Int>.stride, index: 19)
-		renderEncoder.setFragmentBytes(&raysPerPixel, length: MemoryLayout<Int>.stride, index: 20)
-		renderEncoder.setFragmentBytes(&isBetterRayTracing, length: MemoryLayout<Bool>.stride, index: 21)
-		renderEncoder.setFragmentBuffer(statsBuffer, offset: 0, index: 22)
+		var camPos = cameraPosition
+		var acc = isAccumulating
+		var isRT = isRayTracing
+		var betterRT = isBetterRayTracing
+		var maxB = maxBounce
+		var maxBP = maxBouncePreviews
+		var rpp = raysPerPixel
+		
+		setCommonFragmentStateSafe(
+			encoder: renderEncoder,
+			resolution: &resolution,
+			cameraPosition: &camPos,
+			frameCount: &frameCount,
+			isAccumulating: &acc,
+			isRayTracing: &isRT,
+			topLeft: &topLeft,
+			vx: &vx,
+			vy: &vy,
+			tileOrigin: &tileOrigin,
+			tileSizeVec: &tileSizeVec,
+			maxBounce: &maxB,
+			maxBouncePreviews: &maxBP,
+			raysPerPixel: &rpp,
+			isBetterRayTracing: &betterRT,
+			accumulationTexture: accumulationTexture
+		)
 		
 		renderEncoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
 		renderEncoder.endEncoding()
@@ -751,34 +916,7 @@ class Renderer: NSObject, MTKViewDelegate, ObservableObject {
 		// Timing & enregistrement FPS/stats (cadence)
 		commandBuffer.addCompletedHandler { [weak self] cmd in
 			guard let self = self else { return }
-			let start = cmd.gpuStartTime
-			let end   = cmd.gpuEndTime
-			guard start > 0, end > 0 else { return }
-			
-			let workMs = (end - start) * 1000.0
-			var cadenceMs = workMs
-			if let prevEnd = self.lastGPUEndTime {
-				cadenceMs = (end - prevEnd) * 1000.0
-			}
-			self.lastGPUEndTime = end
-			
-			let instFPS = 1000.0 / max(cadenceMs, 0.001)
-			self.emaFPS = self.emaFPS == 0 ? instFPS : (self.alpha * instFPS + (1 - self.alpha) * self.emaFPS)
-			
-			// Log CSV au bon moment
-			if self.makeStat {
-				let angle = self.currentCameraRotation
-				let sample: (Float, CGFloat) = (angle, CGFloat(self.emaFPS))
-				DispatchQueue.main.async {
-					self.recordStats.append(sample)
-				}
-			}
-			
-			DispatchQueue.main.async {
-				self.gpuMsPerFrame = cadenceMs
-				self.GPUTime = workMs
-				self.fps = self.emaFPS
-			}
+			self.handleCompletedCommandBuffer(cmd, appendStats: true)
 		}
 		
 		commandBuffer.present(drawable)
@@ -806,26 +944,20 @@ class Renderer: NSObject, MTKViewDelegate, ObservableObject {
 		}
 		
 		// ─── INPUTS / TOGGLES ───
-		if keyA { toggleAccumulation(); keyA = false }
-		if keyC { takeScreenshot(view: view); keyC = false }
-		if keyr { startOfflineRender(); keyr = false }
-		if isAccumulating { frameCount += 1 }
+		handleInputToggles(view: view)
 	}
-
+	
 	
 	func _draw(in view: MTKView) {
 		let startTime = CACurrentMediaTime()
 		
 		
-		if (accumulationTexture == nil || Int(view.drawableSize.width) != accumulationTexture.width || Int(view.drawableSize.height) != accumulationTexture.height) {
-			createAccumulationTexture(size: view.drawableSize)
-			frameCount = 0
-		}
+		ensureAccumulationTexture(for: view.drawableSize)
 		
 		
 		updateCamera()
 		var resolution = SIMD2<Float>(Float(view.drawableSize.width), Float(view.drawableSize.height))
-		initViewport(camera: camera, resolution: resolution, yaw: yaw, topLeft: &topLeft, vx: &vx, vy: &vy)
+		updateViewportIfNeeded(resolution: resolution)
 		
 		
 		guard let drawable = view.currentDrawable,
@@ -836,24 +968,35 @@ class Renderer: NSObject, MTKViewDelegate, ObservableObject {
 		encoder.setRenderPipelineState(pipelineState)
 		
 		encoder.setFragmentBytes(&resolution, length: MemoryLayout<SIMD2<Float>>.stride, index: 0)
-		encoder.setFragmentBytes(&cameraPosition, length: MemoryLayout<SIMD3<Float>>.stride, index: 1)
-		encoder.setFragmentBuffer(spheresBuffer, offset: 0, index: 2)
-		var nbSpheresVarU32: UInt32 = UInt32(spheres.count)
-		encoder.setFragmentBytes(&nbSpheresVarU32, length: MemoryLayout<UInt32>.stride, index: 3)
-		encoder.setFragmentBuffer(trianglesBuffer, offset: 0, index: 4)
-		var nbTrianglesVarU32: UInt32 = UInt32(triangles.count)
-		encoder.setFragmentBytes(&nbTrianglesVarU32, length: MemoryLayout<UInt32>.stride, index: 5)
-		encoder.setFragmentBuffer(meshesBuffer, offset: 0, index: 6)
-		var nbMeshesVarU32: UInt32 = UInt32(meshes.count)
-		encoder.setFragmentBytes(&nbMeshesVarU32, length: MemoryLayout<UInt32>.stride, index: 7)
-		encoder.setFragmentBytes(&frameCount, length: MemoryLayout<UInt32>.stride, index: 8)
-		encoder.setFragmentBytes(&isAccumulating, length: MemoryLayout<Bool>.stride, index: 9)
-		encoder.setFragmentBytes(&isRayTracing, length: MemoryLayout<Bool>.stride, index: 10)
-		encoder.setFragmentBytes(&topLeft, length: MemoryLayout<SIMD3<Float>>.stride, index: 11)
-		encoder.setFragmentBytes(&vx, length: MemoryLayout<SIMD3<Float>>.stride, index: 12)
-		encoder.setFragmentBytes(&vy, length: MemoryLayout<SIMD3<Float>>.stride, index: 13)
 		
-		encoder.setFragmentTexture(accumulationTexture, index: 0)
+		var camPos = cameraPosition
+		var acc = isAccumulating
+		var isRT = isRayTracing
+		var betterRT = isBetterRayTracing
+		var maxB = maxBounce
+		var maxBP = maxBouncePreviews
+		var rpp = raysPerPixel
+		var tileOrigin = SIMD2<UInt32>(0, 0)
+		var tileSizeVec = SIMD2<UInt32>(UInt32(resolution.x), UInt32(resolution.y))
+		
+		setCommonFragmentStateSafe(
+			encoder: encoder,
+			resolution: &resolution,
+			cameraPosition: &camPos,
+			frameCount: &frameCount,
+			isAccumulating: &acc,
+			isRayTracing: &isRT,
+			topLeft: &topLeft,
+			vx: &vx,
+			vy: &vy,
+			tileOrigin: &tileOrigin,
+			tileSizeVec: &tileSizeVec,
+			maxBounce: &maxB,
+			maxBouncePreviews: &maxBP,
+			raysPerPixel: &rpp,
+			isBetterRayTracing: &betterRT,
+			accumulationTexture: accumulationTexture
+		)
 		
 		
 		encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
@@ -885,6 +1028,6 @@ class Renderer: NSObject, MTKViewDelegate, ObservableObject {
 	func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
 		createAccumulationTexture(size: size)
 		frameCount = 0
+		needViewport = true
 	}
 }
-

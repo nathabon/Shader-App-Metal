@@ -313,7 +313,7 @@ float intersectSphere(float3 center, float radius, float3 origin, float3 dir) {
 	float c = dot(oc, oc) - radius * radius;
 	float discriminant = b * b - 4.0 * a * c;
 	
-	if (discriminant < 0.0) return -1.0;
+	if (discriminant < EPS) return -1.0;
 	float t1 = (-b - sqrt(discriminant)) / (2.0 * a);
 	float t2 = (-b + sqrt(discriminant)) / (2.0 * a);
 	if (t1 > 0.0) return t1;
@@ -338,7 +338,7 @@ float intersectTriangle(float3 A, float3 B, float3 C, float3 n, float3 origin, f
 	float det   = dot(AB, pvec);
 	
 	// Rayon parallèle ou triangle dos tourné (selon que l’on veut culler ou pas)
-	if (fabs(det) < 0) return -1.0;
+	if (fabs(det) < EPS) return -1.0;
 	
 	float invDet = 1.0 / det;
 	
@@ -916,16 +916,16 @@ float3 getColor(Ray ray, constant Material* materials, constant Sphere* spheres,
 		float3 hitPos = rayAt(ray, rayHit.t);
 		
 		// Carrelage sol
-//		if (abs(hitPos.y) < 0.2 && abs(rayHit.n.y) > 0.9) {
-//			float gridSize = 2.0;
-//			int xi = int(floor(hitPos.x / gridSize));
-//			int zi = int(floor(hitPos.z / gridSize));
-//			int parity = (xi + zi) & 1;
-//			
-//			float3 lightGray = float3(0.8);
-//			float3 darkGray  = float3(0.2);
-//			rayHit.material.color *= mix(lightGray, darkGray, parity);
-//		}
+		if (abs(hitPos.y) < 0.2 && abs(rayHit.n.y) > 0.9) {
+			float gridSize = 2.0;
+			int xi = int(floor(hitPos.x / gridSize));
+			int zi = int(floor(hitPos.z / gridSize));
+			int parity = (xi + zi) & 1;
+			
+			float3 lightGray = float3(0.8);
+			float3 darkGray  = float3(0.2);
+			color *= mix(lightGray, darkGray, parity);
+		}
 		
 		Material material = materials[rayHit.materialIndex];
 		
@@ -957,9 +957,7 @@ float3 getColor(Ray ray, constant Material* materials, constant Sphere* spheres,
 				newDir = normalize(refractP(ray.dir, n, eta));
 			}
 			
-			ray.origin = hitPos + newDir * EPS;
-			ray.dir = newDir;
-			
+			ray = createRay(hitPos + newDir * EPS, newDir);
 			color *= material.color;
 		} else {
 			ray.origin = hitPos + rayHit.n * EPS;
@@ -972,14 +970,17 @@ float3 getColor(Ray ray, constant Material* materials, constant Sphere* spheres,
 			
 			color *= material.color;
 			
-			// Choix direction rebond
+			float3 newDir;
+			
 			if (material.smoothness > 1 - EPS) {
-				ray.dir = specularDir;
+				newDir = specularDir;
 			} else if (material.smoothness < EPS) {
-				ray.dir = diffuseDir;
+				newDir = diffuseDir;
 			} else {
-				ray.dir = normalize(lerp(specularDir, diffuseDir, material.smoothness));
+				newDir = normalize(lerp(specularDir, diffuseDir, material.smoothness));
 			}
+			
+			ray = createRay(hitPos + rayHit.n * EPS, newDir);
 		}
 	}
 		

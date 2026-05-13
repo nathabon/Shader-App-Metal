@@ -85,7 +85,7 @@ extension Comparable {
 }
 
 
-// MARK: - Vue principale ------------------------------------------------------
+// MARK: - Vue principale
 
 struct ContentView: View {
 	
@@ -348,13 +348,6 @@ struct ControlPanel: View {
 							)
 						}
 					}
-				}
-				
-				Divider()
-				
-				DisclosureGroup("Objets") {
-					DisclosureGroup("Monkey") {}
-					DisclosureGroup("Sphère 1") {}
 				}
 				
 				Divider()
